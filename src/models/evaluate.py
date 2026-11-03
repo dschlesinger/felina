@@ -29,6 +29,7 @@ from models import REGISTRY, CYPModel, dimred
 from models.TabPFN import WIDE_FEATURES as _TABPFN_WIDE
 from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
+from models.recalibrate import recalibrate
 from models.run_log import changed_flags, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
 from data_tools.paths import DATA_DIR, FEATURE_DIR
@@ -647,6 +648,20 @@ def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
     _print(table)
 
 
+def _print_affine(log: list[tuple[str, str, str, float, float]]) -> None:
+    """Print the slope and intercept of the affine recalibration applied to each prediction set."""
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title="Affine recalibration", title_style="bold")
+    for column, justify in (("target", "left"), ("model", "left"), ("input", "left"), ("slope", "right"), ("intercept", "right")):
+        table.add_column(column, justify=justify, overflow="fold")
+    for target, name, input_label, slope, intercept in log:
+        table.add_row(
+            escape(target.replace("_pIC50_direct_inhibition", "")), escape(name), escape(_short(input_label)),
+            f"{slope:.3f}", f"{intercept:+.3f}",
+        )
+    console.print()
+    console.print(table)
+
+
 def _print_stacks(reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]]) -> None:
     """Print each stacker's per-model weights; share is the weight over the sum of absolute weights."""
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title_style="bold", padding=(0, 1), pad_edge=False)
@@ -775,6 +790,14 @@ def main() -> None:
         "about 0.013 lower and is not comparable to scaffold results. Needs data/test.csv.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting")
+    parser.add_argument(
+        "--affine-recalibration",
+        action="store_true",
+        help="Recalibrate every prediction set (each model and ensemble) with y = slope * prediction + intercept, "
+        "fitted by least squares on the out-of-fold predictions of the training portion and applied once to the "
+        "validation and blind rows (Platt-style linear recalibration; see models/recalibrate.py). Cross-validation "
+        "metrics use a map fitted on the other folds only. Requires --nfolds",
+    )
     parser.add_argument(
         "--butina-cutoff",
         type=float,
@@ -960,6 +983,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         parser.error("--cv-filter none cannot be combined with other filters")
     if args.cv_filter not in (None, ["none"]) and args.nfolds is None:
         parser.error("--cv-filter requires --nfolds")
+    if args.affine_recalibration and args.nfolds is None:
+        parser.error("--affine-recalibration requires --nfolds (it is fitted on out-of-fold predictions)")
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
     if args.nseeds < 1:
@@ -1101,6 +1126,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     plot_rows: list[dict] = []
     stack_reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]] = []
     filter_log: list[dict] = []
+    # (target, model, input, slope, intercept) per recalibrated prediction set
+    affine_log: list[tuple[str, str, str, float, float]] = []
     # target -> (model, input) -> {val row index: prediction}
     corr_preds: dict[str, dict[tuple[str, str], dict[int, float]]] = {}
     # (model, input) -> target -> prediction per blind row
@@ -1112,6 +1139,9 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
 
     def record(target: str, name: str, input_label: str, out: dict, data: dict) -> None:
         """Score one prediction set on the validation rows and queue it for the printed and exported results."""
+        if args.affine_recalibration:
+            out, (slope, intercept) = recalibrate(out, data["y_train"], data["fold_ids"])
+            affine_log.append((target, name, input_label, slope, intercept))
         predictions = out["val"]
         y_val = data["y_val"]
         metrics = _compute_metrics(pl.Series("actual", y_val.tolist()), pl.Series("prediction", predictions.tolist()))
@@ -1301,6 +1331,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         + (f"  [dim]ensemble[/]={method}" if ensembling else "")
         + (f"  [dim]cv-filter[/]={'+'.join(filters)}" if filters else "")
         + ("  [dim]cv-dedup[/]=on" if dedup else "")
+        + ("  [dim]affine-recalibration[/]=on" if args.affine_recalibration else "")
     )
     _print_results(results, args.sort_by)
     if unblinded_results:
@@ -1318,6 +1349,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
             "  [dim](metrics averaged over held-out folds of the training portion)[/]"
         )
         _print_results(cv_results, args.sort_by)
+    if affine_log:
+        _print_affine(affine_log)
     if filter_log:
         _print_filter_log(filter_log, filters, dedup)
     if stack_reports:

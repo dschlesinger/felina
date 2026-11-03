@@ -372,6 +372,13 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
 - Models whose validation predictions correlate above 0.95 (Pearson, complete
   linkage) are averaged into one before ensembling; `--no-cv-deduplication`
   disables this. It runs after the filters.
+- `--affine-recalibration`: recalibrate every model and ensemble row with
+  `y = slope * prediction + intercept` (Platt-style linear recalibration; the
+  calibration slope/intercept of Steyerberg et al. 2010, fit-on-held-out as in
+  Kuleshov et al. 2018). The least-squares map is fitted on the out-of-fold
+  predictions only and applied once to the validation and blind rows; the CV
+  metrics use a map fitted on the other folds, so they stay honest. Slopes and
+  intercepts are printed in an `Affine recalibration` table. Plain `--nfolds`.
 - Every filter and deduplication decision is logged to stderr and summarised in an
   `ensemble filters` table with each model's scores, kept/dropped status and cluster.
 
