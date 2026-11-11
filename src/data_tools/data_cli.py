@@ -12,8 +12,8 @@ from rich.console import Console
 from rich.table import Table
 
 from data_tools import dataset_alias
+from data_tools.dataset_spec import Source
 from data_tools.datasets import Dataset, registry
-from data_tools.merge_datasets import SOURCES, Source
 
 console = Console()
 
@@ -78,8 +78,8 @@ def _list(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
         status = _status(dataset, args.data_dir)
         primary = args.data_dir / dataset.primary
         ready = primary.is_file()
-        # Training sources (`--datasets NAME:ISO`) that read one of this dataset's files.
-        sources = [(n, src) for n, src in SOURCES.items() if src.filename in dataset.files] or [("-", None)]
+        # Training sources (`--datasets NAME:ISO`) this dataset offers; a dataset may offer none.
+        sources = list(dataset.sources.items()) or [("-", None)]
         for i, (train_name, source) in enumerate(sources):
             isoforms = _isoforms(source, args.data_dir) if source is not None else []
             first = i == 0
@@ -109,13 +109,11 @@ def _fetch(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
         dataset = datasets[name]
         print(f"== {name}", file=sys.stderr)
         fetched = [args.data_dir / f for f in dataset.fetched]
-        if args.force:
-            for path in fetched:
-                path.unlink(missing_ok=True)
-        if all(path.exists() for path in fetched):
-            print("Skipping fetch (already exists); pass --force to refetch", file=sys.stderr)
+        if not args.redownload and all(path.exists() for path in fetched):
+            print("Reusing the raw files already here; pass --redownload to fetch them again", file=sys.stderr)
         else:
             dataset.fetch(args.data_dir)
+        # Derive always runs, so a change to the reshape is picked up without refetching.
         if dataset.derive is not None:
             dataset.derive(args.data_dir)
 
@@ -164,7 +162,7 @@ def main(argv: list[str] | None = None) -> None:
 
     fetch = commands.add_parser("fetch", help="Fetch datasets by name or alias, then derive their model-ready tables")
     fetch.add_argument("names", nargs="+", metavar="NAME", help="Dataset names or aliases, or 'all'")
-    fetch.add_argument("--force", action="store_true", help="Refetch even if the raw files exist")
+    fetch.add_argument("--redownload", action="store_true", help="Fetch the raw files again instead of reusing them")
     fetch.set_defaults(run=_fetch)
 
     remove = commands.add_parser("remove", help="Delete datasets' files (raw and derived); aliases are kept")
@@ -187,7 +185,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def download_all() -> None:
-    """Entry point for download-data: `data fetch all`, passing any extra arguments (such as --force) through."""
+    """Entry point for download-data: `data fetch all`, passing any extra arguments (such as --redownload) through."""
     main(["fetch", "all", *sys.argv[1:]])
 
 

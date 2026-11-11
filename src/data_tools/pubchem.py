@@ -48,21 +48,23 @@ _PANEL_TO_ISOFORM = {
 _TIMEOUT_S = 600
 
 
-def download_raw(dest: Path, force: bool = False) -> Path:
-    """Download the full AID 1851 data table CSV (~24 MB) unless already present.
+def download_raw(dest: Path) -> Path:
+    """Download the full AID 1851 data table CSV (~24 MB), replacing whatever is at dest.
 
     Uses the bulk datatable endpoint: PUG REST refuses this assay outright
     ("Assay record retrieval is limited to 10000 SIDs") and the FTP archive
     only ships it inside a 1.3 GB multi-assay zip.
+
+    Whether to call this at all is the CLI's decision (`data fetch --redownload`); it does no caching itself.
+    Writes to a temporary file first, so an interrupted download leaves the previous copy intact.
     """
-    if dest.exists() and not force:
-        print(f"Skipping download (already exists): {dest}", file=sys.stderr)
-        return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading AID 1851 data table -> {dest}", file=sys.stderr)
     request = Request(_PCGET_URL, headers={"User-Agent": "openadmet-cyp/0.1"})
-    with urlopen(request, timeout=_TIMEOUT_S) as response, dest.open("wb") as f:
+    partial = dest.with_name(dest.name + ".part")
+    with urlopen(request, timeout=_TIMEOUT_S) as response, partial.open("wb") as f:
         f.write(response.read())
+    partial.replace(dest)
     print(f"Saved {dest.stat().st_size / 1e6:.1f} MB", file=sys.stderr)
     return dest
 
