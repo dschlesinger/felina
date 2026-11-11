@@ -1,101 +1,52 @@
-"""Registry of the datasets this project knows how to obtain.
+"""Discovery of the project's dataset definitions.
 
-Each Dataset is a recipe: `fetch` pulls the raw data from its source, `derive` (optional) builds the model-ready
-table from what fetch wrote. Both take the data directory and write under it. To add a dataset, append one entry in
-`_build()`; the data CLI picks it up with no other change.
+Every dataset is one module under `data_tools.dataset_defs` exporting a `DatasetSpec` named `SPEC`, holding its
+URL, fetch step, derive step, and training heads. This module finds them; it knows nothing about any particular
+dataset. To add one, add a module there.
 """
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
+import importlib
+import pkgutil
+from functools import cache
 
-Step = Callable[[Path], None]
+from data_tools.dataset_spec import DatasetSpec, Source, Step  # noqa: F401  (re-exported for convenience)
 
-
-@dataclass(frozen=True)
-class Dataset:
-    name: str
-    group: str
-    description: str
-    fetched: tuple[str, ...]  # files fetch writes, relative to the data directory
-    fetch: Step
-    derived: tuple[str, ...] = ()  # files derive writes, relative to the data directory
-    derive: Step | None = None
-    directories: tuple[str, ...] = ()  # extra directories fetch fills, removed whole by `data remove`
-
-    @property
-    def files(self) -> tuple[str, ...]:
-        return self.fetched + self.derived
-
-    @property
-    def primary(self) -> str:
-        """The file models consume: the last derived file, else the last fetched one."""
-        return self.files[-1]
+Dataset = DatasetSpec  # the spec is the dataset; the old name still works
 
 
-def _hf_csv(url: str, relative: str) -> Step:
-    def fetch(data_dir: Path) -> None:
-        from data_tools.download import _download_split
-
-        _download_split(url, data_dir / relative)
-
-    return fetch
-
-
-def _fetch_pubchem(data_dir: Path) -> None:
-    from data_tools.pubchem import download_raw
-
-    download_raw(data_dir / "pubchem_aid1851_raw.csv")
-
-
-def _derive_pubchem(data_dir: Path) -> None:
-    from data_tools.pubchem import reshape, write_csv
-
-    fieldnames, rows = reshape(data_dir / "pubchem_aid1851_raw.csv")
-    write_csv(fieldnames, rows, data_dir / "pubchem_aid1851.csv")
+def _collect(package) -> list[DatasetSpec]:
+    """Every spec in a package. A dataset may be a module or a package; a package without a SPEC is a group."""
+    specs: list[DatasetSpec] = []
+    for info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
+        if info.name.rsplit(".", 1)[-1].startswith("_"):
+            continue
+        module = importlib.import_module(info.name)
+        spec = getattr(module, "SPEC", None)
+        if isinstance(spec, DatasetSpec):
+            # A dataset. Whatever else is inside it is its own implementation, not more datasets.
+            specs.append(spec)
+        elif info.ispkg:
+            specs.extend(_collect(module))  # a folder grouping datasets, like metabolism/
+        else:
+            raise ValueError(f"{info.name} defines no SPEC; every module in dataset_defs must export one")
+    return specs
 
 
-def _fetch_p450_family(data_dir: Path) -> None:
-    import data_tools.family_datasets as fd
+@cache
+def registry() -> dict[str, DatasetSpec]:
+    """Every known dataset by name, in listing order."""
+    from data_tools import dataset_defs
 
-    targets = fd.collect_family_targets(fd._DEFAULT_PFAM_ID, fd._DEFAULT_BINDINGDB_CUTOFF_NM, fd._DEFAULT_MAX_WORKERS)
-    fd.write_datasets(targets, data_dir / "families", fd._DEFAULT_TOP_N, fd._DEFAULT_MIN_RECORDS)
-
-
-def _derive_p450_family(data_dir: Path) -> None:
-    from data_tools.family_heads import write_heads
-
-    write_heads(data_dir / "families" / "manifest.csv", data_dir / "family_heads.csv")
-
-
-def _build() -> dict[str, Dataset]:
-    from data_tools import download as dl
-
-    datasets = [
-        Dataset("train", "challenge", "Direct-inhibition train split (pIC50 per isoform)",
-                ("train.csv",), _hf_csv(dl._HF_BASE + dl._HF_TRAIN, "train.csv")),
-        Dataset("test", "challenge", "Blinded test split",
-                ("test.csv",), _hf_csv(dl._HF_BASE + dl._HF_TEST, "test.csv")),
-        Dataset("tdi_train", "challenge", "Time-dependent inhibition (TDI) train split",
-                ("tdi_train.csv",), _hf_csv(dl._HF_BASE + dl._HF_TDI_TRAIN, "tdi_train.csv")),
-        Dataset("emax_train", "challenge", "Emax train split",
-                ("emax_train.csv",), _hf_csv(dl._HF_BASE + dl._HF_EMAX_TRAIN, "emax_train.csv")),
-        Dataset("single_concentration_train", "challenge", "Single-concentration train split",
-                ("single_concentration_train.csv",),
-                _hf_csv(dl._HF_BASE + dl._HF_SINGLE_CONC_TRAIN, "single_concentration_train.csv")),
-        Dataset("pubchem_aid1851", "auxiliary", "PubChem AID 1851 (Veith CYP qHTS panel) reshaped into per-isoform heads",
-                ("pubchem_aid1851_raw.csv",), _fetch_pubchem,
-                ("pubchem_aid1851.csv",), _derive_pubchem),
-        Dataset("p450_family", "auxiliary", "ChEMBL + BindingDB affinity across the P450 family, pivoted into per-protein heads",
-                ("families/manifest.csv",), _fetch_p450_family,
-                ("family_heads.csv",), _derive_p450_family, directories=("families",)),
-    ]
-    for name, (url, description) in dl._METABOLISM_DATASETS.items():
-        relative = f"{dl._METABOLISM_DIR}/{name}.csv"
-        datasets.append(Dataset(name, "metabolism", description, (relative,), _hf_csv(url, relative)))
-    return {d.name: d for d in datasets}
-
-
-def registry() -> dict[str, Dataset]:
-    """Every known dataset by name."""
-    return _build()
+    specs = _collect(dataset_defs)
+    specs.sort(key=lambda s: (s.order, s.name))
+    datasets: dict[str, DatasetSpec] = {}
+    sources: dict[str, str] = {}
+    for spec in specs:
+        if spec.name in datasets:
+            raise ValueError(f"two datasets are both named {spec.name!r}")
+        for source in spec.sources:
+            if source in sources:
+                raise ValueError(f"datasets {sources[source]!r} and {spec.name!r} both define the source {source!r}")
+            sources[source] = spec.name
+        datasets[spec.name] = spec
+    return datasets
