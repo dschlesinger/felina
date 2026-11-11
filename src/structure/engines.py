@@ -11,9 +11,9 @@ Boltz-2 input: Boltz YAML (protein + ligand entities, affinity property).
 Both engines accept HEM as a CCD code — the CCD entry carries the Fe atom,
 so the Cys442-Fe coordination is chemistry the models learned, not a bond we
 have to specify. Protenix's explicit covalent_bonds block is the production
-variant (see tasks/T5-structure-generation.md).
+variant.
 
-Output contract (tasks/T5-structure-generation.md):
+Output contract:
     inchikey_block, isoform, method, structure_path, confidence,
     predicted_affinity, completed
 """
@@ -170,7 +170,7 @@ def to_wsl(path: Path) -> str:
 
 @dataclass
 class CoFoldResult:
-    """Normalized engine output, per the T5 manifest contract."""
+    """Normalized engine output, per the manifest contract."""
 
     method: str
     structure_path: Path | None

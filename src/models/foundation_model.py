@@ -1,4 +1,4 @@
-"""CLI for managing trained foundation models (chemprop grid runs and fine-tuned Uni-Mol runs)."""
+"""CLI for managing trained foundation models (chemprop runs and fine-tuned Uni-Mol runs)."""
 
 import argparse
 import os
@@ -120,7 +120,7 @@ def _print_models(kind: Kind, home: Path, models: list[tuple[str, list[Path]]], 
 
 
 def _assign_aliases(kind: Kind, models: list[tuple[str, list[Path]]]) -> dict[str, str]:
-    """Alias every run's weights path that has none yet, e.g. chemprop grid/admet_chemeleon seed0 -> admet_chemeleon_0.
+    """Alias every run's weights path that has none yet, e.g. chemprop challenge seed0 -> challenge_0.
 
     The path prefix shared by all models is dropped, and the model name is truncated to _MODEL_CHARS characters.
     Models that truncate to the same name get a numeric suffix from ensure_aliases.

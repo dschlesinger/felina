@@ -16,8 +16,7 @@ and reference mass the slice cannot cover at all is reported as unsupported
 rather than silently redistributed.
 
 These are *evaluation* weights for distribution shift. They are unrelated to
-training-time sample weights derived from label measurement error, which T7
-owns in `weights.py`.
+training-time sample weights derived from label measurement error.
 """
 
 import numpy as np

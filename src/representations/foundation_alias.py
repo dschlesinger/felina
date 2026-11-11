@@ -1,6 +1,6 @@
 """Short aliases for foundation-model weights paths, stored in foundation-path-alias.csv.
 
-An alias stands in for a weights path inside `chemprop[...]`, so `chemprop[grid_admet_chemeleon_seed0]` works
+An alias stands in for a weights path inside `chemprop[...]`, so `chemprop[challenge_0]` works
 wherever `chemprop[/long/path/model_0/best.pt]` does. Paths are stored resolved; each path has one alias and each
 alias names one path.
 """

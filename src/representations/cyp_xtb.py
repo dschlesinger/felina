@@ -4,12 +4,11 @@ Two blocks share one conformer-ensemble computation:
 
 * ``XTBSolvation`` (``xtb_solv_v1``) -- solvation and ionization: ALPB solvation
   free energies in water and 1-octanol, the xTB logP derived from them, a
-  heuristic fraction-neutral at pH 7.4, and the resulting logD estimate. This
-  follows the permeability-feature idea of PXR rank 14 (bear), simplified:
-  ionization comes from a fixed-pKa SMARTS table, not microstate enumeration.
+  heuristic fraction-neutral at pH 7.4, and the resulting logD estimate. Ionization
+  comes from a fixed-pKa SMARTS table, not microstate enumeration.
 * ``XTBElectronic`` (``xtb_elec_v1``) -- Boltzmann-averaged electronic, charge,
-  surface, shape and flexibility terms, in the spirit of PXR rank 40 (briford's
-  26 curated GFN2-xTB descriptors).
+  surface, shape and flexibility terms from a curated set of GFN2-xTB
+  descriptors.
 
 Geometry: ETKDGv3 conformers, MMFF94 (UFF fallback) optimized; xTB is used for
 single points only (``tblite``'s Python API has no optimizer). Per-conformer

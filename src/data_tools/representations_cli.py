@@ -21,7 +21,7 @@ console = Console()
 
 
 def _molecules(data_dir: Path) -> pl.DataFrame:
-    """Unique SMILES of the challenge train and blinded test sets: what evaluate-models and generate-results featurize."""
+    """Unique SMILES of the challenge train and blinded test sets: what evaluate-models featurizes."""
     frames = [load_train(data_dir / "train.csv").select("SMILES"), load_test(data_dir / "test.csv").select("SMILES")]
     return pl.concat(frames).unique(subset=["SMILES"], keep="first", maintain_order=True)
 

@@ -29,7 +29,7 @@ def smooth_targets(targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 @LossFunctionRegistry.register("huber")
 class Huber(MSE):
-    """Huber loss. Module-level so chemprop can pickle it into checkpoints (loading one needs models.chemprop_ext importable)."""
+    """Huber loss. Module-level so chemprop can pickle it into checkpoints (loading one needs models.chemprop_losses importable)."""
 
     def _calc_unreduced_loss(self, preds, targets, *args):
         return F.huber_loss(preds, targets, reduction="none", delta=float(_CONFIG["huber_delta"]))

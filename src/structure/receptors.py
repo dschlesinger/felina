@@ -1,4 +1,4 @@
-"""Isoform registry and receptor prep (T5 scope step 1).
+"""Isoform registry and receptor prep.
 
 For each scored CYP isoform we need three things to build a co-fold input:
   1. The canonical protein sequence (UniProt).
@@ -8,7 +8,7 @@ For each scored CYP isoform we need three things to build a co-fold input:
   3. A holo crystal structure with resolved heme, for reference geometry
      (heme-plane normal, Fe position) and later bake-off validation.
 
-PDB choices per tasks/T5-structure-generation.md:
+PDB choices:
     CYP1A2 -> 2HI4, CYP2C9 -> 1OG5, CYP2D6 -> 4WNV, CYP3A4 -> 4NY4.
 
 Receptor-prep choices (documented so downstream isn't silently invalidated):
@@ -19,7 +19,7 @@ Receptor-prep choices (documented so downstream isn't silently invalidated):
   - The Cys-Fe coordination is not expressed as a covalent bond for
     IntelliFold/AF3-style inputs (schema has no cross-entity bonds); HEM's CCD
     carries the Fe and the models saw CYP-HEM complexes in training. Protenix's
-    explicit covalent_bonds block is the production follow-up (see T5).
+    explicit covalent_bonds block is the production follow-up.
 """
 
 from __future__ import annotations

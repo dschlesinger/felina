@@ -38,7 +38,7 @@ class Ligand:
     name: str
     smiles: str
     inchikey: str
-    connectivity_block: str  # first block of the InChIKey = T5/T6 join key
+    connectivity_block: str  # first block of the InChIKey = join key
 
 
 def fetch_ligand(name: str, root: Path | None = None) -> Ligand:

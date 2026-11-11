@@ -1,7 +1,7 @@
-"""Heme-coordination geometry: the T6 headline features, computed from any
+"""Heme-coordination geometry: the headline features, computed from any
 mmCIF that contains HEM (predicted co-fold or crystal reference).
 
-Features, in T6's priority order:
+Features, in priority order:
   1. min N->Fe distance over the ligand's sp2/sp3 nitrogens — the Type II
      coordination signature (coordinated: ~2.0-2.5 A for pyridine/azole N).
   2. approach angle: N-Fe vector vs the heme-plane normal. Axial coordination

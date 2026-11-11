@@ -32,6 +32,12 @@ trains (x seeds). Later stages inherit the first stage's encoder size.
 Extra flags (--huber-delta, --label-noise, --label-shrink, --lr-decay, --mpn-dropout,
 --ffn-dropout, ...) are described in models.chemprop_ext.
 
+Extra molecule features. `--input NAME [NAME ...]` (any registered representation,
+e.g. rdkit, morgan, cyp_mech_v1; see `evaluate-models --help`) is computed for every
+stage's molecules, cached in data/features/ per molecule, and passed to chemprop as
+`--descriptors-path`. Non-finite values are set to 0 with a warning, so no molecule is
+dropped. chemprop scales these features by default (`--no-descriptor-scaling` turns it off).
+
 Only the datasets you list train (names from --list-datasets); the last stage is
 evaluated on the pinned split. Earlier stages train on molecules in the pinned
 train split only, so no val/test molecule is seen during pretraining; they use
@@ -46,8 +52,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
+from data_tools.inputs import featurize, is_known_input
 from data_tools.merge_datasets import parse_dataset_specs
 from models.training.base import Backend
 from models.training.common import merge_stage, slug
@@ -121,6 +129,23 @@ def stage_flags(args: argparse.Namespace, index: int, n_stages: int) -> list[str
     return flags
 
 
+def descriptor_flags(table: pl.DataFrame, input_names: list[str] | None, directory: Path) -> list[str]:
+    """Write `descriptors.npz` for `table`'s rows (same order) and return chemprop's flag for it.
+
+    Empty when no inputs are requested. Features come from the shared per-molecule cache.
+    """
+    if not input_names:
+        return []
+    from models.utils import zero_nonfinite_features
+
+    features = np.asarray(featurize(table, input_names), dtype=np.float64)
+    features = zero_nonfinite_features(features, label="+".join(input_names), names=table["SMILES"].to_list())
+    path = directory / "descriptors.npz"
+    np.savez(path, features)  # positional array is stored as arr_0, which chemprop reads
+    print(f"  wrote {path} shape={features.shape}", file=sys.stderr)
+    return ["--descriptors-path", str(path)]
+
+
 def _with_loss(loss_function: str | None, task_type: str) -> list[str]:
     """Loss flag for a stage; only regression stages take --loss-function."""
     return ["--loss-function", loss_function] if loss_function and task_type == "regression" else []
@@ -180,6 +205,14 @@ class ChempropBackend(Backend):
         )
         parser.add_argument("--smiles-column", default="SMILES", help="Name of the SMILES column (default: SMILES)")
         parser.add_argument(
+            "--input",
+            nargs="+",
+            default=None,
+            metavar="NAME",
+            help="Registered representation(s) to add as extra molecule features for every stage "
+            "(passed to chemprop as --descriptors-path; chemprop scales them by default)",
+        )
+        parser.add_argument(
             "--loss-function",
             default=None,
             help="Loss for regression stages (e.g. mae, mse). Classification stages keep chemprop's default.",
@@ -213,6 +246,9 @@ class ChempropBackend(Backend):
             parser.error("pass exactly one of --data-path, --datasets or --stage")
         if args.data_path is not None and not args.target_columns:
             parser.error("--target-columns is required with --data-path")
+        unknown_inputs = [n for n in args.input or [] if not is_known_input(n)]
+        if unknown_inputs:
+            parser.error(f"unknown --input name(s): {unknown_inputs}")
         if stage_specs is not None:
             for dest in ["stage_epochs", "stage_loss", *STAGE_FLAGS]:
                 values = getattr(args, dest, None)
@@ -239,9 +275,10 @@ class ChempropBackend(Backend):
         if stage_specs is None:  # a ready table: one plain run
             output_dir = args.output_dir or results_root / f"{args.data_path.stem}_{'+'.join(args.target_columns)}"
             output_dir.mkdir(parents=True, exist_ok=True)
+            features = descriptor_flags(pl.read_csv(args.data_path), args.input, output_dir)
             cmd = build_command(
                 args.data_path, args.smiles_column, args.target_columns, output_dir, args.epochs, args.seed,
-                args.from_foundation, _with_loss(args.loss_function, "regression") + sweep_flags + extra_args,
+                args.from_foundation, _with_loss(args.loss_function, "regression") + features + sweep_flags + extra_args,
             )
             print(f"Running: {' '.join(cmd)}", file=sys.stderr)
             return subprocess.run(cmd, check=False).returncode
@@ -278,6 +315,7 @@ class ChempropBackend(Backend):
                 table = table.filter(pl.col("split") == "train")
                 extra = list(extra_args)
             table = table.filter(pl.any_horizontal([pl.col(h).is_not_null() for h in target_columns]))
+            extra = descriptor_flags(table, args.input, stage_dir) + extra
 
             kinds = {tasks[h] for h in target_columns}
             task_type = "classification" if kinds == {"classification"} else "regression"

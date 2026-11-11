@@ -11,7 +11,7 @@ from data_tools.split_column import _SCORED_DEFAULT, _butina_groups, _scaffold_g
 
 _DEFAULT_DATA_DIR = Path("data")
 
-# Label columns are sparse: in a multi-source union table a column can be null
+# Label columns are sparse: in a multi-source merged table a column can be null
 # for the first thousands of rows, so polars' default 100-row schema inference
 # types it String and every downstream numeric op fails. Always infer from the
 # whole file.

@@ -109,7 +109,7 @@ INPUT_REGISTRY: dict[str, Callable[[pl.DataFrame], np.ndarray]] = {
     _mordred.name: _mordred_features,
     _shape.name: _shape_features,
     _unimol.name: _unimol_features,
-    # --- R2 pharmacophore blocks (append-only; versioned names pin the motif table) ---
+    # --- CYP pharmacophore blocks (append-only; versioned names pin the motif table) ---
     _cyp_heme.name: _cyp_heme_features,
     _cyp_isoform.name: _cyp_isoform_features,
     _cyp_tdi.name: _cyp_tdi_features,

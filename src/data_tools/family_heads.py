@@ -2,23 +2,22 @@
 
 `data fetch p450_family` writes one CSV per protein with a single pooled
 `pAffinity` column (see data_tools.family_datasets). That shape cannot enter
-the union table: every file would contribute a head named `pAffinity`, so two
+a merged multi-task table: every file would contribute a head named `pAffinity`, so two
 files collide, and the pooling hides IC50/Ki/Kd/EC50 from two databases inside
 one column where no task weighting can separate them.
 
 This module pivots the manifest into one column per protein per source, named
-`{gene}_pIC50_{source}`, so each lands in the union as its own head and
-`head-search` discovers it automatically.
+`{gene}_pIC50_{source}`, so each lands as its own head in a merged multi-task table.
 
 Note what the overlapping genes mean. A ChEMBL CYP3A4 IC50 head is not a
 different isoform -- it is the *same endpoint* as the scored CYP3A4 column,
 measured in other labs on other chemistry. Kept as a separate head it needs no
-cross-assay correction, and it is a strong candidate for the most useful head
-in the search, not a distractor.
+cross-assay correction, and it is a strong candidate for a useful auxiliary
+head, not a distractor.
 
 By default only IC50 records are kept: it is the endpoint the challenge scores,
 and mixing Ki/Kd/EC50 into one column reintroduces the pooling problem. Pass
---affinity-types to widen, or --split-by-affinity-type to give each its own head.
+`affinity_types` to write_heads() to widen, or `split_by_affinity_type=True` to give each its own head.
 """
 
 import csv
@@ -40,10 +39,9 @@ def select_proteins(
 ) -> list[dict]:
     """Return manifest rows passing the filters, richest first.
 
-    Filtering matters for the search, not just for runtime: most PF00067
-    entries are bacterial or plant P450s whose ligand data says little about
-    human CYP inhibition, and every extra candidate both costs runs and makes
-    it likelier that the best-looking subset is noise.
+    Filtering matters beyond runtime: most PF00067 entries are bacterial or
+    plant P450s whose ligand data says little about human CYP inhibition, and
+    every extra head adds training cost and noise.
     """
     with manifest_path.open(newline="") as f:
         rows = list(csv.DictReader(f))

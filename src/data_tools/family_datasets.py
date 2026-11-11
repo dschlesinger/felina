@@ -2,7 +2,7 @@
 
 Pulls every reviewed UniProt entry in the P450 Pfam family (PF00067), fetches
 known-ligand affinity data for each from ChEMBL and BindingDB, ranks proteins
-by how much data is available, and writes a train_chemprop-ready CSV
+by how much data is available, and writes a chemprop-ready CSV
 (SMILES, pAffinity) for the top N — candidates for pretraining Chemprop
 before fine-tuning/transferring to the CYP isoforms in this challenge.
 """

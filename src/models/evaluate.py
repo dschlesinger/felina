@@ -148,7 +148,7 @@ def _evaluate_model(
 _ENSEMBLE_METHODS = {"average": np.mean, "min": np.min, "max": np.max}
 
 
-# Learned per-target weights over the models' out-of-fold predictions, as in stack.py.
+# Learned per-target weights over the models' out-of-fold predictions (nnls, ridgecv, elasticnetcv as in stack.py; caruana via caruana.py).
 _STACKERS = ["nnls", "caruana", "ridgecv", "elasticnetcv"]
 
 
@@ -657,8 +657,7 @@ def main() -> None:
         choices=["random", "scaffold", "butina", "blind_matched"],
         help="Train/val split strategy (default: scaffold). 'blind_matched' makes the validation slice "
         "imitate data/test.csv (~75%% novel scaffolds instead of 100%%, closer to train); it scores "
-        "about 0.013 lower and is not comparable to scaffold results. Needs data/test.csv. "
-        "See reports/blind_matched_split.md",
+        "about 0.013 lower and is not comparable to scaffold results. Needs data/test.csv.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting")
     parser.add_argument(

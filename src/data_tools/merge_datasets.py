@@ -1,8 +1,7 @@
 """Merge selected datasets into one wide multi-task table at training time.
 
-`build-union` writes a fixed table to disk. This does the same join on the fly
-for whichever sources a run asks for, so experiments can mix sources without
-rebuilding anything. Every source x isoform x readout becomes its own column
+Joins on the fly for whichever sources a run asks for, so experiments can mix
+sources without rebuilding anything. Every source x isoform x readout becomes its own column
 (its own head): `CYP2D6-BindingDB`, `CYP3A4-TDI`, `CYP1A2-PubChem`, ... No
 measurements are pooled across sources.
 
@@ -10,7 +9,7 @@ Two kinds of source, joined differently:
 
   in-house   challenge, tdi, emax, single_conc. Same OCNT molecules, keyed on
              Molecule_Name, then collapsed on the full InChIKey so
-             stereoisomers stay distinct (as in build_union).
+             stereoisomers stay distinct.
   external   pubchem, chembl, bindingdb. Joined on the InChIKey connectivity
              block so salts and stereo variants match.
 
@@ -18,7 +17,7 @@ The train/val/test split is computed on the in-house molecules alone, so it is
 identical whichever external sources are selected and runs stay comparable.
 Molecules with no scored label (including every external-only molecule) are
 always train. Molecules whose skeleton appears in the blind test set are
-dropped, as in build_union.
+dropped.
 """
 
 import re
@@ -261,7 +260,7 @@ def merge(
         # The held-out slices imitate the blind set's regime instead of holding out
         # whole scaffold families. The blind molecules themselves are the reference,
         # so this needs test_path. Opt-in only: the default stays `scaffold`, which
-        # is the split every recorded head-search result is reported against.
+        # is the split every recorded result is reported against.
         if test_path is None or not test_path.exists():
             raise ValueError(
                 "split_strategy='blind_matched' needs the blind set as its reference; "

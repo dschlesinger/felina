@@ -194,10 +194,6 @@ def run(config: dict) -> None:
             input_names=model_config.get("input_names"),
             output_dir=output_dir / configuration_id / "oof",
             cache_dir=output_dir / "features",
-            chemprop_config=model_config.get("chemprop_config"),
-            group_column="oof_group",
-            validation_fraction=model_config.get("validation_fraction", 0.1),
-            validation_seed=model_config.get("validation_seed", 42),
             seeds=config["seeds"],
         )
         model_dir = output_dir / configuration_id
@@ -216,10 +212,6 @@ def run(config: dict) -> None:
             input_names=model_config.get("input_names"),
             output_dir=output_dir / configuration_id / "validation",
             cache_dir=output_dir / "features",
-            chemprop_config=model_config.get("chemprop_config"),
-            group_column="oof_group",
-            validation_fraction=model_config.get("validation_fraction", 0.1),
-            validation_seed=model_config.get("validation_seed", 42),
             seeds=config["seeds"],
             targets=SCORED_TARGETS,
         )

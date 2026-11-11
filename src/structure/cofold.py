@@ -7,12 +7,12 @@ Steps:
   1. fetch CYP3A4 sequence (UniProt P08684) + ligand SMILES (PubChem)
   2. build engine input (IntelliFold AF3-JSON, or Boltz YAML fallback)
   3. run engine in WSL on the 5090, log wall time
-  4. parse output -> common schema, write manifest row (T5 contract)
+  4. parse output -> common schema, write manifest row
   5. compute heme-coordination metrics
   6. render HTML + PNG into reports/structures/
 
 The manifest row is appended to data/structures/manifest.csv; failures are
-recorded with completed=False rather than dropped (the T5 contract's
+recorded with completed=False rather than dropped (the manifest's
 load-bearing flag).
 """
 

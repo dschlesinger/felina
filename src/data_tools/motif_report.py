@@ -1,9 +1,9 @@
 """Generate `reports/pharmacophore_features.md` from the motif table.
 
 The report is generated from the same objects that produce the features, so the
-published documentation and the computed columns cannot drift. A motif or
+generated documentation and the computed columns cannot drift. A motif or
 descriptor without a literature source raises: that is the mechanism enforcing
-RULES.md section 5 (do not encode chemistry from memory or on an AI tool's word).
+that every motif is backed by a cited source.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def build_report(train_df: pl.DataFrame, test_df: pl.DataFrame) -> str:
         raise ValueError(
             f"{len(missing)} uncited entr{'y' if len(missing) == 1 else 'ies'}: "
             f"{', '.join(missing)}. Every motif and descriptor needs a literature "
-            "source before the report or any benchmark runs (RULES.md section 5)."
+            "source before the report or any benchmark runs."
         )
 
     blocks = [
@@ -77,7 +77,7 @@ def build_report(train_df: pl.DataFrame, test_df: pl.DataFrame) -> str:
         lines += [
             f"## {title}",
             "",
-            "| Feature | SMARTS | T6 rollup | Train % | Test % | Source |",
+            "| Feature | SMARTS | Rollup | Train % | Test % | Source |",
             "|---|---|---|---|---|---|",
         ]
         for m in (x for x in cp._MOTIFS if x.block == block_tag):
@@ -118,7 +118,7 @@ def build_report(train_df: pl.DataFrame, test_df: pl.DataFrame) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate the pharmacophore motif report.")
-    parser.add_argument("--train", default="data/union_train.csv")
+    parser.add_argument("--train", default="data/train.csv")
     parser.add_argument("--test", default="data/test.csv")
     parser.add_argument("--out", default=str(_DEFAULT_OUT))
     args = parser.parse_args()

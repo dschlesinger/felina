@@ -29,7 +29,7 @@ def standardize_smiles(smiles: str) -> Optional[str]:
 
     Neutralization is left to RDKit's default sanitization plus fragment
     selection; we deliberately do not run a full tautomer canonicalizer,
-    which is slow and, for a 31k-molecule union, changes few keys.
+    which is slow and, for a 31k-molecule merged table, changes few keys.
     """
     try:
         from rdkit import Chem  # type: ignore[import]

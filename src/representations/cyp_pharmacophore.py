@@ -3,13 +3,12 @@
 preference descriptors, and mechanism-based inactivation alerts.
 
 The motif table below is the single source of truth. `src/data_tools/motif_report.py`
-generates `reports/pharmacophore_features.md` from it, so the published report and
+generates `reports/pharmacophore_features.md` from it, so the generated report and
 the computed features cannot drift, and a motif without a literature `source`
 raises rather than emitting a blank cell.
 
 Every SMARTS here was checked against named compounds before being committed;
-see `tests/test_cyp_pharmacophore.py`. Sources are catalogued in
-`docs/superpowers/specs/2026-10-08-cyp-pharmacophore-features-design.md` section 12.
+see `tests/test_cyp_pharmacophore.py`. Sources are cited inline.
 
 DO NOT add a motif because it improved a validation score. A motif added that way
 is a fitted parameter. Fix the list from the literature first.
@@ -42,7 +41,7 @@ class Motif:
     smarts: str
     block: str  # "heme" | "tdi"
     source: str  # literature citation; empty blocks the report generator
-    rollup: str = ""  # T6 donor label, for the 2D/3D comparison
+    rollup: str = ""  # donor label, for the 2D/3D comparison
     note: str = ""
 
 
@@ -93,7 +92,7 @@ _AZOLE_EXTRAPOLATION = (
     "EXTRAPOLATION, not directly sourced: Monk et al. 2020 names imidazole, triazole "
     "and tetrazole as the azole heme-ligating pharmacophore. Thiazole and oxazole are "
     "five-membered azoles whose pyridine-type ring nitrogen is assumed to coordinate "
-    "similarly, but no source in the spec's section 12 covers them. Treat these "
+    "similarly, but no cited source covers them. Treat these "
     "columns as unvalidated."
 )
 _DIAZINE_EXTRAPOLATION = (
@@ -102,10 +101,10 @@ _DIAZINE_EXTRAPOLATION = (
     "bearing a pyridine-type donor nitrogen and is assumed to behave likewise; that "
     "extension is not in the paper."
 )
-_T6_AMINE_CATEGORY = (
-    "tasks/round1/T6-structure-features.md:64-65 — T6's own coordinating-environment "
-    "category list names 'aliphatic amine' alongside imidazole, triazole and pyridine, "
-    "which is what this column mirrors. Note Paine et al. 2003 supports only that a "
+_AMINE_CATEGORY = (
+    "Aliphatic amines are grouped with imidazole, triazole and pyridine as potential "
+    "heme-coordinating nitrogens in this block's donor taxonomy (the rollup labels). "
+    "Note Paine et al. 2003 supports only that a "
     "basic nitrogen is characteristic of CYP2D6 ligands; it says nothing about "
     "aliphatic amines ligating heme iron."
 )
@@ -144,11 +143,11 @@ _MOTIFS: tuple[Motif, ...] = (
     # --- aliphatic amines ---
     Motif("heme_amine_primary",
           "[NX3;H2;!$(NC=O);!$(NS(=O)=O);!$(N[a]);!$(N=*);!$(NC=[N,S,O]);!$(N[N,O])]",
-          "heme", _T6_AMINE_CATEGORY, "aliphatic amine",
+          "heme", _AMINE_CATEGORY, "aliphatic amine",
           "Excludes amides, sulfonamides and anilines, which are not donors."),
     Motif("heme_amine_basic",
           "[NX3;H0,H1;!$(NC=O);!$(NS(=O)=O);!$(N[a]);!$(N=*);!$(NC=[N,S,O]);!$(N[N,O]);!$(N#*)]",
-          "heme", _T6_AMINE_CATEGORY, "aliphatic amine",
+          "heme", _AMINE_CATEGORY, "aliphatic amine",
           "Secondary and tertiary basic aliphatic amines."),
     # --- mechanism-based inactivation (time-dependent, not direct, inhibition) ---
     Motif("tdi_mdp", "c1ccc2c(c1)OCO2", "tdi", _MAO_2025, "",
@@ -288,7 +287,7 @@ class _SmartsCountBlock(Representation):
 
 class HemeCoordinationMotifs(_SmartsCountBlock):
     """Substructure counts for nitrogens able to ligate the heme iron, plus a
-    steric-accessibility split. The 2D control for round-1 T6."""
+    steric-accessibility split. The 2D control for 3D heme-coordination metrics."""
 
     name: ClassVar[str] = f"cyp_heme_{TABLE_VERSION}"
     block: ClassVar[str] = "heme"
@@ -300,7 +299,6 @@ class MechanismBasedAlerts(_SmartsCountBlock):
 
     Emitted as a separate registered block because these concern TDI rather than
     direct inhibition, so little signal is expected on the four scored heads.
-    Round-1 T1 adds TDI heads and will want them.
     """
 
     name: ClassVar[str] = f"cyp_tdi_{TABLE_VERSION}"
@@ -312,8 +310,7 @@ class IsoformPreferenceDescriptors(Representation):
     """Physicochemical descriptors chosen for the four scored isoforms.
 
     Each is justified from a cited medicinal-chemistry source in
-    `_ISOFORM_FEATURES`; see the spec's section 12.2. Per RULES.md section 5,
-    none is encoded from memory.
+    `_ISOFORM_FEATURES`. None is encoded from memory.
     """
 
     name: ClassVar[str] = f"cyp_isoform_{TABLE_VERSION}"

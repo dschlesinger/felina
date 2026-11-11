@@ -42,7 +42,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["scaffold", "butina", "random", "blind_matched"],
         help="How to hold out val/test. 'scaffold' is the pinned default every recorded result "
         "uses; 'blind_matched' instead makes the held-out slices imitate the blind set's regime "
-        "(see data_tools.split_column), which scores about 0.03 lower and is not comparable to it.",
+        "(see data_tools.split_column), which scores about 0.013 lower and is not comparable to it.",
     )
     parser.add_argument("--split-seed", type=int, default=0, help="Seed for the merged table's split (default: 0)")
     parser.add_argument(
@@ -135,7 +135,7 @@ def write_val_outputs(
     eval_map: dict[str, str],
     run_info: dict[str, object],
 ) -> None:
-    """Score each scored head on val; write predictions.csv (T4 long format) and metrics.csv."""
+    """Score each scored head on val; write predictions.csv (long format) and metrics.csv."""
     long_frames, metric_rows = [], []
     for head, source in eval_map.items():
         labelled = val_df[head].notna().to_numpy()

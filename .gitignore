@@ -1,5 +1,5 @@
 ﻿# Private challenge data, generated predictions, and submission packages
-# RULES.md: data, results, checkpoints, predictions, and credentials stay out of Git.
+# Data, results, checkpoints, predictions, and credentials stay out of Git.
 data/
 results/
 submissions/

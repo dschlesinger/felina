@@ -1,16 +1,13 @@
 """Generate, validate, and save OOF predictions using saved fold assignments.
 
 Use full InChIKeys for row identity and reject connectivity blocks that
-span folds. Support feature models, Chemprop, and multiple training seeds.
+span folds. Support feature models and multiple training seeds.
 """
 
 import argparse
 import hashlib
 import json
-import math
-import tempfile
 from collections.abc import Callable
-from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
@@ -413,7 +410,7 @@ def _generate_fold_predictions(
         raise ValueError(
             f"Unknown input(s): {unknown}. "
             f"Use registered inputs {list(INPUT_REGISTRY)} "
-            "or chemprop[path-or-alias]."
+            "or chemprop[path-or-alias] / unimol[path-or-alias]."
         )
     
     if not input_names:
@@ -720,10 +717,6 @@ def run_oof(
     input_names: list[str] | None = None,
     output_dir: Path,
     cache_dir: Path | None = None,
-    chemprop_config: dict | None = None,
-    group_column: str | None = None,
-    validation_fraction: float | None = None,
-    validation_seed: int | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Generate OOF predictions using saved folds within pinned training data.
 
@@ -737,39 +730,14 @@ def run_oof(
 
     data = _load_oof_data(data_path, folds_path)
 
-    if model_name == "chemprop":
-        from models.oof_chemprop import _resolve_chemprop_config
+    if model_name not in REGISTRY:
+        raise ValueError(f"Unknown model: {model_name}")
 
-        resolved_config = _resolve_chemprop_config(chemprop_config)
+    if not input_names:
+        raise ValueError("input_names is required")
 
-        if not isinstance(group_column, str) or not group_column.strip():
-            raise ValueError("Chemprop requires a nonblank group column")
-
-        if group_column not in data.columns:
-            raise ValueError(f"Missing group column: {group_column}")
-
-        if isinstance(validation_seed, bool) or not isinstance(validation_seed, int):
-            raise ValueError("validation_seed must be integer")
-
-        if (
-            isinstance(validation_fraction, bool)
-            or not isinstance(validation_fraction, (int, float))
-            or not math.isfinite(validation_fraction)
-            or not 0 < validation_fraction < 1
-        ):
-            raise ValueError(
-                "validation_fraction must be a finite number strictly between 0 and 1"
-            )
-
-    else:
-        if model_name not in REGISTRY:
-            raise ValueError(f"Unknown model: {model_name}")
-
-        if not input_names:
-            raise ValueError(f"input_names is required for feature-based models")
-
-        if cache_dir is None:
-            raise ValueError("cache_dir is required for feature-based models")
+    if cache_dir is None:
+        raise ValueError("cache_dir is required")
 
     truth_rows = []
 
@@ -802,83 +770,33 @@ def run_oof(
     if truth.is_empty():
         raise ValueError("No observed scored labels")
 
-    if model_name == "chemprop":
-        foundation = resolved_config["from_foundation"]
+    if model_params is None:
+        model_params = {}
 
-        if foundation is None:
-            foundation_identity = None
-        elif foundation == "chemeleon":
-            checkpoint = Path.home() / ".chemprop" / "chemeleon_mp.pt"
+    if not isinstance(model_params, dict):
+        raise ValueError("model_params must be a dictionary")
 
-            if not checkpoint.is_file():
-                raise FileNotFoundError(
-                    "CheMeleon weights must be downloaded before creating "
-                    "the OOF resume fingerprint."
-                )
+    checkpoint_identities = {}
 
-            foundation_identity = {
-                "name": "chemeleon",
+    for name in input_names:
+        checkpoint = parse_spec(name)
+        if checkpoint is not None:
+            checkpoint = checkpoint.resolve()
+            checkpoint_identities[name] = {
+                "path": str(checkpoint),
                 "sha256": _file_sha256(checkpoint),
             }
-            
-        else:
-            foundation_identity = {
-                "sha256": _file_sha256(Path(foundation))
-            }
 
-        chemprop_version = version("chemprop")
-    
-        fingerprint = {
-            "data_sha256": _file_sha256(data_path),
-            "folds_sha256": _file_sha256(folds_path),
-            "model_name": model_name, 
-            "model_id": model_id,
-            "chemprop_config": {
-                key: value
-                for key, value in resolved_config.items()
-                if key not in {"training_timeout", "prediction_timeout"}
-            },
-            "internal_validation": {
-                "policy": "shuffled_group_prefix_v1",
-                "group_column": group_column,
-                "fraction": validation_fraction,
-                "seed": validation_seed,
-            },
-            "foundation_identity": foundation_identity,
-            "chemprop_version": chemprop_version,
-            "adapter_version": 1,
-        }
-    
-        run_id = _make_run_id(fingerprint)
-
-    else:
-        if model_params is None:
-            model_params = {}
-
-        if not isinstance(model_params, dict):
-            raise ValueError("model_params must be a dictionary")
-
-        checkpoint_identities = {}
-
-        for name in input_names:
-            checkpoint = parse_spec(name)
-            if checkpoint is not None:
-                checkpoint = checkpoint.resolve()
-                checkpoint_identities[name] = {
-                    "path": str(checkpoint),
-                    "sha256": _file_sha256(checkpoint),
-                }
-
-        run_id = _make_run_id({
-            "data_sha256": _file_sha256(data_path),
-            "folds_sha256": _file_sha256(folds_path),
-            "model_name": model_name,
-            "model_id": model_id,
-            "model_params": model_params,
-            "input_names": input_names,
-            "checkpoint_identities": checkpoint_identities,
-            "targets": _SCORED_DEFAULT,
-        })
+    run_id = _make_run_id({
+        "data_sha256": _file_sha256(data_path),
+        "folds_sha256": _file_sha256(folds_path),
+        "model_name": model_name,
+        "model_id": model_id,
+        "model_params": model_params,
+        "input_names": input_names,
+        "checkpoint_identities": checkpoint_identities,
+        "targets": _SCORED_DEFAULT,
+    })
 
     fold_predictions = []
 
@@ -891,42 +809,17 @@ def run_oof(
         job_dir = output_dir / f"fold-{fold}"
 
         def generate_predictions():
-            if model_name == "chemprop":
-                # Need to clean this up soon
-                from models.oof_chemprop import _split_internal_validation, _generate_chemprop_fold_predictions
-                train_df_chem, val_df =  _split_internal_validation(
-                    training_pool=train_df,
-                    group_column=group_column,
-                    validation_fraction=validation_fraction,
-                    seed=validation_seed,
-                )
-
-                job_dir.mkdir(parents=True, exist_ok=True)
-                work_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=job_dir))
-
-                return _generate_chemprop_fold_predictions(
-                    train_df=train_df_chem,
-                    val_df=val_df,
-                    heldout_df=heldout_df,
-                    truth=truth,
-                    model_id=model_id,
-                    heldout_fold=fold,
-                    work_dir=work_dir,
-                    **resolved_config,
-                )
-
-            else: 
-                return _generate_fold_predictions(
-                    train_df=train_df,
-                    heldout_df=heldout_df,
-                    model_name=model_name,
-                    model_id=model_id,
-                    model_params=model_params,
-                    input_names=input_names,
-                    targets=_SCORED_DEFAULT,
-                    heldout_fold=fold,
-                    cache_dir=cache_dir,
-                )
+            return _generate_fold_predictions(
+                train_df=train_df,
+                heldout_df=heldout_df,
+                model_name=model_name,
+                model_id=model_id,
+                model_params=model_params,
+                input_names=input_names,
+                targets=_SCORED_DEFAULT,
+                heldout_fold=fold,
+                cache_dir=cache_dir,
+            )
 
         _run_fold_job(
             job_dir=job_dir,
@@ -966,16 +859,11 @@ def run_oof_seeds(
     input_names: list[str] | None = None,
     output_dir: Path,
     cache_dir: Path | None = None,
-    chemprop_config: dict | None = None,
-    group_column: str | None = None,
-    validation_fraction: float | None = None,
-    validation_seed: int | None = None, 
     seeds: list[int],
 ) -> tuple[dict[int, pl.DataFrame], pl.DataFrame]:
     """Call run_oof for multiple seeds.
     
-    This wrapper only supports Chemprop and feature-based models which
-    accept random_state. 
+    Models must accept random_state.
     """
 
     if len(seeds) < 3:
@@ -992,21 +880,13 @@ def run_oof_seeds(
     first_truth = None
 
     for seed in seeds:
-        chemprop_config_copy = None
-        model_params_copy = None
-        if model_name == "chemprop":
-            if not isinstance(chemprop_config, dict):
-                raise ValueError("chemprop_config must be dict")
-            chemprop_config_copy = chemprop_config.copy()
-            chemprop_config_copy["seed"] = seed
-        else: 
-            if model_params is None:
-                model_params_copy = {}
-            else:
-                if not isinstance(model_params, dict):
-                    raise ValueError("model_params must be dict")
-                model_params_copy = model_params.copy()
-            model_params_copy["random_state"] = seed
+        if model_params is None:
+            model_params_copy = {}
+        else:
+            if not isinstance(model_params, dict):
+                raise ValueError("model_params must be dict")
+            model_params_copy = model_params.copy()
+        model_params_copy["random_state"] = seed
 
         seed_model_id = f"{model_id}_seed{seed}"
         seed_output_dir = output_dir / f"seed-{seed}"
@@ -1020,10 +900,6 @@ def run_oof_seeds(
             input_names=input_names,
             output_dir=seed_output_dir,
             cache_dir=cache_dir,
-            chemprop_config=chemprop_config_copy,
-            group_column=group_column,
-            validation_fraction=validation_fraction,
-            validation_seed=validation_seed, 
         )
         predictions_by_seed[seed] = predictions
 
@@ -1033,147 +909,6 @@ def run_oof_seeds(
             raise ValueError("truth is different for different seeds")
 
     return predictions_by_seed, first_truth
-
-
-def _convert_chemprop_predictions(
-    predictions: pl.DataFrame,
-    truth: pl.DataFrame,
-    model_id: str, 
-    heldout_fold: int,
-) -> pl.DataFrame:
-    """Convert and validate chemprop predictions."""
-
-    # Required ID and four scored-target columns exist
-    required = {"inchikey_full", *_SCORED_DEFAULT}
-    missing = required - set(predictions.columns)
-
-    if missing:
-        raise ValueError(
-            f"Missing prediction columns: {sorted(missing)}"
-        )
-
-    duplicates = (predictions.group_by("inchikey_full").len().filter(pl.col("len") > 1))
-    if not duplicates.is_empty():
-        raise ValueError(
-            f"predictions contains duplicate molecules IDs: "
-            f"{duplicates.head(5).to_dicts()}" 
-        )
-
-    for target in _SCORED_DEFAULT:
-        if not predictions[target].dtype.is_numeric():
-            raise ValueError(f"Predictions for {target} must be numeric")
-
-    truth_required = {"inchikey_full", "fold", "target", "truth"}
-    missing = truth_required - set(truth.columns)
-    if missing:
-        raise ValueError(f"truth is missing required columns: {sorted(missing)}")
-
-    if truth.is_empty():
-        raise ValueError("truth table is empty")
-
-    if not truth["fold"].dtype.is_integer():
-        raise ValueError("truth.fold must contain integers")
-
-    if truth["target"].dtype != pl.String:
-        raise ValueError("truth.target must contain strings")
-
-    if any(truth[c].null_count() > 0 for c in truth_required):
-        raise ValueError("truth contains null values")
-
-    if isinstance(heldout_fold, bool) or not isinstance(heldout_fold, int):
-        raise ValueError("heldout_fold must be an integer")
-
-    if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("model_id must be a nonblank string")
-
-    if predictions["inchikey_full"].null_count() > 0:
-        raise ValueError("predictions.inchikey_full contains nulls")
-    
-    if predictions["inchikey_full"].dtype != pl.String:
-        raise ValueError("predictions.inchikey_full must contain strings")
-
-    if (predictions["inchikey_full"].str.strip_chars() == "").any():
-        raise ValueError("predictions.inchikey_full contains blank identifiers")
-
-
-    if truth["inchikey_full"].dtype != pl.String:
-        raise ValueError("truth.inchikey_full must contain strings")
-
-    if (truth["inchikey_full"].str.strip_chars() == "").any():
-        raise ValueError("truth.inchikey_full contains blanks identifiers")
-
-    truth = truth.with_columns(
-        pl.col("fold").cast(pl.Int64)
-    )
-
-    expected_ids = truth.filter(
-        pl.col("fold") == heldout_fold
-    ).select("inchikey_full").unique()
-
-    if expected_ids.is_empty():
-        raise ValueError(f"No truth rows for held-out fold {heldout_fold}")
-
-    actual_ids = predictions.select("inchikey_full")
-
-    missing = expected_ids.join(
-        actual_ids, on="inchikey_full", how="anti"
-    )
-
-    if not missing.is_empty():
-        raise ValueError(f"Missing molecules: {missing.head(5).to_dicts()}")
-
-    extra = actual_ids.join(
-        expected_ids, on="inchikey_full", how="anti"
-    )
-
-    if not extra.is_empty():
-        raise ValueError(f"Unexpected molecules: {extra.head(5).to_dicts()}")
-
-    # Conversion preserves the correct ID → target → prediction mapping
-    prediction_rows = []
-
-    for target in _SCORED_DEFAULT:
-        for molecule, value in predictions.select(
-            "inchikey_full", target
-        ).iter_rows():
-            prediction_rows.append({
-                "model_id": model_id, 
-                "inchikey_full": molecule,
-                "fold": heldout_fold,
-                "target": target,
-                "pred": value,
-            })
-     
-    converted = pl.DataFrame(
-        prediction_rows,
-        schema={
-            "model_id": pl.String,
-            "inchikey_full": pl.String,
-            "fold": pl.Int64,
-            "target": pl.String,
-            "pred": pl.Float64,
-        }
-    )
-
-    keys = ["inchikey_full", "fold", "target"]
-    expected_keys = truth.filter(
-        pl.col("fold") == heldout_fold
-    ).select("inchikey_full", "fold", "target")
-
-    converted = converted.join(
-        expected_keys, 
-        on=keys,
-        how="semi"
-    )
-
-    _validate_inputs(
-        truth=truth,
-        heldout_fold=heldout_fold,
-        predictions=converted,
-        model_id=model_id
-    )
-
-    return converted
 
 
 def main() -> None:
@@ -1196,9 +931,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--model-name",
-        choices=[*REGISTRY, "chemprop"],
+        choices=list(REGISTRY),
         required=True,
-        help="Registered feature-based or chemprop model to train for each fold.",
+        help="Registered model to train for each fold.",
     )
     parser.add_argument(
         "--model-id",
@@ -1230,37 +965,6 @@ def main() -> None:
         required=False,
         help="Directory for cached molecular features.",
     )
-    parser.add_argument(
-        "--chemprop-config",
-        required=False,
-        help=(
-        "JSON object required for --model-name chemprop. "
-        "Required keys: epochs, seed, target_columns, from_foundation "
-        "(null, 'chemeleon', or a local checkpoint path). "
-        "Optional: training_timeout and prediction_timeout in seconds."
-    ),
-    )
-    parser.add_argument(
-        "--group-column",
-        type=str,
-        required=False,
-        help="Identifies groups that must be kept together during " 
-             "internal-validation selection.",
-    )
-    parser.add_argument(
-        "--validation-fraction",
-        type=float,
-        required=False,
-        help="Requested approximate fraction of non-heldout molecules used " 
-             " for internal validation. It is approximate because groups remain intact.",
-    )
-    parser.add_argument(
-        "--validation-seed",
-        type=int,
-        required=False,
-        help="Seed for internal validation.",
-    )
-
     args = parser.parse_args()
 
     try:
@@ -1271,38 +975,17 @@ def main() -> None:
     if not isinstance(model_params, dict):
         parser.error("--model-params must be a JSON object")
 
-    chemprop_config = None
+    if args.input_names is None:
+        parser.error("--input-names is required")
+    unknown = [
+        name for name in args.input_names
+        if not is_known_input(name)
+    ]
+    if unknown:
+        parser.error(f"--input-names: unknown input(s): {unknown}")
+    if args.cache_dir is None:
+        parser.error("--cache-dir is required")
 
-    if args.chemprop_config is not None:
-        try:
-            chemprop_config = json.loads(args.chemprop_config)
-        except json.JSONDecodeError as exc:
-            parser.error(f"--chemprop-config must be valid JSON: {exc}")
-
-        if not isinstance(chemprop_config, dict):
-            parser.error("--chemprop-config must be a JSON object")
-        
-    if args.model_name == "chemprop":
-        if args.chemprop_config is None:
-            parser.error("--chemprop-config is required for Chemprop")
-        if args.group_column is None:
-            parser.error("--group-column is required for Chemprop")
-        if args.validation_fraction is None:
-            parser.error("--validation-fraction is required for Chemprop")
-        if args.validation_seed is None:
-            parser.error("--validation-seed is required for Chemprop")
-    else:
-        if args.input_names is None:
-            parser.error("--input-names is required for feature-based models")
-        unknown = [
-            name for name in args.input_names
-            if not is_known_input(name)
-        ]
-        if unknown:
-            parser.error(f"--input-names: unknown input(s): {unknown}")
-        if args.cache_dir is None:
-            parser.error("--cache-dir is required for feature-based models")
-        
     run_oof(
         data_path=args.data_path, 
         folds_path=args.folds_path,
@@ -1312,10 +995,6 @@ def main() -> None:
         input_names=args.input_names,
         output_dir=args.output_dir,
         cache_dir=args.cache_dir,
-        chemprop_config=chemprop_config,
-        group_column=args.group_column,
-        validation_fraction=args.validation_fraction,
-        validation_seed=args.validation_seed,
     )
 
     print(f"Saved OOF predictions and truth to {args.output_dir}")

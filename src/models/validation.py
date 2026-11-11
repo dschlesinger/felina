@@ -4,8 +4,6 @@ Provide R² quality filtering, held-out/OOF RAE-ratio filtering, and
 correlation-based model deduplication for ensemble selection.
 """
 
-import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -15,11 +13,6 @@ from scipy.spatial.distance import squareform
 
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from models import REGISTRY
-from models.oof_chemprop import (
-    _resolve_chemprop_config,
-    _split_internal_validation,
-)
-from models.training.chemprop import build_command
 from models.utils import drop_nan_rows
 
 
@@ -60,7 +53,7 @@ def validation_prediction(
         raise ValueError(
             f"Unknown input(s): {unknown}. "
             f"Use registered inputs {list(INPUT_REGISTRY)} "
-            "or chemprop[path-or-alias]."
+            "or chemprop[path-or-alias] / unimol[path-or-alias]."
         )
     
     if not input_names:
@@ -243,407 +236,6 @@ def validation_prediction(
     return predictions, truth
 
 
-def validation_prediction_chemprop(
-    df: pl.DataFrame, 
-    model_id: str, 
-    work_dir: Path, 
-    target_columns: list[str],
-    epochs: int, 
-    seed: int,
-    group_column, 
-    validation_fraction, 
-    validation_seed,
-    from_foundation: str | None = None,
-    training_timeout: int = 300,
-    prediction_timeout: int = 300,
-    accelerator: str = "cpu",
-    devices: int = 1,
-    num_workers: int = 0,
-    batch_size: int = 4,
-    warmup_epochs: int = 0,
-  
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Validation prediction for chemprop only.
-    
-    Internal validation comes from pinned train, while pinned val is 
-    predicted and evaluated.
-    """
-    
-    if "split" not in df.columns:
-        raise ValueError("split column must exist")
-
-    train_df = df.filter(pl.col("split") == "train")
-    val_df = df.filter(pl.col("split") == "val")
-
-    
-    if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("model_id must be a nonblank string")
-    
-    if not target_columns:
-        raise ValueError("target_columns must not be empty")
-
-    if any(
-        not isinstance(target, str) or not target.strip()
-        for target in target_columns
-    ):
-        raise ValueError("target_columns must contain nonblank strings")
-
-    if len(target_columns) != len(set(target_columns)):
-        raise ValueError("target_columns contains duplicate names")
-
-    missing_targets = set(_SCORED_DEFAULT) - set(target_columns)
-    if missing_targets:
-        raise ValueError(
-            f"Missing scored targets: {sorted(missing_targets)}"
-        )
-
-    reserved = {"inchikey_full", "inchikey_block", "SMILES", "split", "fold", "model_id"}
-    invalid_targets = reserved & set(target_columns)
-    if invalid_targets:
-        raise ValueError(
-            f"Target names conflict with metadata columns: {sorted(invalid_targets)}"
-        )
-
-    required = {"inchikey_full", "inchikey_block", "SMILES", *target_columns}
-
-    train_df_missing = required - set(train_df.columns)
-    if train_df_missing:
-        raise ValueError(f"train_df is missing required columns: {sorted(train_df_missing)}")
-
-    val_df_missing = required - set(val_df.columns)
-    if val_df_missing:
-        raise ValueError(f"val_df is missing required columns: {sorted(val_df_missing)}")
-
-    for name, df in [
-        ("train_df", train_df),
-        ("val_df", val_df),
-    ]:
-        for column in ("inchikey_full", "inchikey_block", "SMILES"):
-            values = df[column]
-            if values.dtype != pl.String:
-                raise ValueError(f"{name}.{column} must contain strings")
-            
-            if values.null_count() > 0:
-                raise ValueError(f"{name}.{column} contains null values")
-
-            if (values.str.strip_chars() == "").any():
-                raise ValueError(f"{name}.{column} contains blank values")
-            
-        duplicates = (
-            df.group_by("inchikey_full")
-            .len()
-            .filter(pl.col("len") > 1)
-        )
-        if not duplicates.is_empty():
-            raise ValueError(f"{name} contains duplicate molecule IDs")
-
-    train_ids = set(train_df["inchikey_block"].to_list())
-    val_ids = set(val_df["inchikey_block"].to_list())
-
-    if train_ids & val_ids:
-        raise ValueError("Training and validation molecules overlap")
-
-    if len(train_df) == 0:
-        raise ValueError("train_df is empty")
-    
-    if len(val_df) == 0:
-        raise ValueError("val_df is empty")
-
-    for name, df in [
-        ("train_df", train_df),
-        ("val_df", val_df),
-    ]:
-        for target in target_columns:
-            values = df[target]
-
-            # An entirely missing column may have Polars Null dtype.
-            if values.dtype != pl.Null and not values.dtype.is_numeric():
-                raise ValueError(f"{name}.{target} must be numeric")
-
-            values = values.cast(pl.Float64)
-
-            if values.is_infinite().any():
-                raise ValueError(f"{name}.{target} contains infinite values")
-
-    # Standardize dtypes for concatenation.
-    # Treat NaN as a missing label and write missing labels as empty CSV cells.
-    target_expressions = [
-        pl.col(target).cast(pl.Float64).fill_nan(None)
-        for target in target_columns
-    ]
-
-    train_df = train_df.with_columns(target_expressions)
-    val_df = val_df.with_columns(target_expressions)
-
-    for target in _SCORED_DEFAULT:
-        if train_df[target].drop_nulls().is_empty():
-            raise ValueError(f"No training labels for scored target {target}")
-
-    columns = ["inchikey_full", "SMILES", *target_columns]
-
-    truth_tables = []
-    for target in _SCORED_DEFAULT:
-        observed_val = val_df.filter(pl.col(target).is_not_null())
-
-        if observed_val.is_empty():
-            raise ValueError(f"No validation labels for scored target {target}")
-
-        truth_tables.append(
-            observed_val.select(
-                "inchikey_full",
-                pl.lit(target).alias("target"),
-                pl.col(target).cast(pl.Float64).alias("truth"),
-            )
-        )
-
-    truth = pl.concat(truth_tables)
-
-    fit_df, internal_val_df = _split_internal_validation(
-        train_df,
-        group_column=group_column,
-        validation_fraction=validation_fraction,
-        seed=validation_seed,
-    )
-
-    training_data = pl.concat([
-        fit_df.select(columns).with_columns(
-            pl.lit("train").alias("split")
-        ),
-        internal_val_df.select(columns).with_columns(
-            pl.lit("val").alias("split")
-        ),
-    ])
-
-    prediction_data = val_df.select("inchikey_full", "SMILES")
-
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    if any(work_dir.iterdir()):
-        raise ValueError(
-            f"work_dir must be empty for a new training attempt: {work_dir}"
-        )
-
-    training_path = work_dir / "training.csv"
-    output_dir = work_dir / "chemprop"
-    predictions_path = work_dir / "native_predictions.csv"
-    val_path = work_dir / "val.csv"
-
-    training_data.write_csv(training_path)
-    prediction_data.write_csv(val_path)
-
-    cmd = build_command(
-        data_path=training_path,
-        smiles_column="SMILES",
-        target_columns=target_columns,
-        output_dir=output_dir,
-        epochs=epochs,
-        seed=seed,
-        from_foundation=from_foundation,
-        extra_args=[
-            "--splits-column", "split",
-            "--accelerator", accelerator,
-            "--devices", str(devices),
-            "--num-workers", str(num_workers),
-            "--batch-size", str(batch_size),
-            "--warmup-epochs", str(warmup_epochs),
-        ],
-    )
-
-    cmd[0] = str(Path(sys.executable).parent / "chemprop")
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=training_timeout,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Chemprop training failed:\n{result.stdout}\n{result.stderr}"
-        )
-
-    model_path = output_dir / "model_0" / "best.pt"
-
-    if not model_path.is_file():
-        raise FileNotFoundError(
-            f"Chemprop training did not produce a model at {model_path}"
-        )
-
-    predict_cmd = [
-        cmd[0],
-        "predict",
-        "--test-path", str(val_path),
-        "--model-path", str(model_path),
-        "--preds-path", str(predictions_path),
-        "--smiles-columns", "SMILES",
-         "--accelerator", accelerator,
-        "--devices", str(devices),
-        "--num-workers", str(num_workers),
-        "--batch-size", str(batch_size),
-    ]
-
-    result = subprocess.run(
-        predict_cmd,
-        capture_output=True,
-        text=True,
-        timeout=prediction_timeout,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Chemprop prediction failed:\n{result.stdout}\n{result.stderr}"
-        )
-
-    if not predictions_path.is_file():
-        raise FileNotFoundError(
-            f"Chemprop did not produce predictions at {predictions_path}"
-        )
-
-    predictions = _convert_chemprop_predictions_validation(
-        predictions=pl.read_csv(predictions_path),
-        truth=truth,
-        model_id=model_id,
-    )
-    
-    return predictions, truth
-
-
-def _convert_chemprop_predictions_validation(
-    predictions: pl.DataFrame,
-    truth: pl.DataFrame,
-    model_id: str, 
-) -> pl.DataFrame:
-    """Convert and validate chemprop predictions."""
-
-    # Required ID and four scored-target columns exist
-    required = {"inchikey_full", *_SCORED_DEFAULT}
-    missing = required - set(predictions.columns)
-
-    if missing:
-        raise ValueError(
-            f"Missing prediction columns: {sorted(missing)}"
-        )
-
-    duplicates = (predictions.group_by("inchikey_full").len().filter(pl.col("len") > 1))
-    if not duplicates.is_empty():
-        raise ValueError(
-            f"predictions contains duplicate molecules IDs: "
-            f"{duplicates.head(5).to_dicts()}" 
-        )
-
-    for target in _SCORED_DEFAULT:
-        if not predictions[target].dtype.is_numeric():
-            raise ValueError(f"Predictions for {target} must be numeric")
-
-    truth_required = {"inchikey_full", "target", "truth"}
-    missing = truth_required - set(truth.columns)
-    if missing:
-        raise ValueError(f"truth is missing required columns: {sorted(missing)}")
-
-    if truth.is_empty():
-        raise ValueError("truth table is empty")
-
-    if truth["target"].dtype != pl.String:
-        raise ValueError("truth.target must contain strings")
-
-    if any(truth[c].null_count() > 0 for c in truth_required):
-        raise ValueError("truth contains null values")
-
-    if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("model_id must be a nonblank string")
-
-    if predictions["inchikey_full"].null_count() > 0:
-        raise ValueError("predictions.inchikey_full contains nulls")
-    
-    if predictions["inchikey_full"].dtype != pl.String:
-        raise ValueError("predictions.inchikey_full must contain strings")
-
-    if (predictions["inchikey_full"].str.strip_chars() == "").any():
-        raise ValueError("predictions.inchikey_full contains blank identifiers")
-
-    if truth["inchikey_full"].dtype != pl.String:
-        raise ValueError("truth.inchikey_full must contain strings")
-
-    if (truth["inchikey_full"].str.strip_chars() == "").any():
-        raise ValueError("truth.inchikey_full contains blanks identifiers")
-
-    truth_dtype = truth["truth"].dtype
-    if not (truth_dtype.is_integer() or truth_dtype.is_float()):
-        raise ValueError("truth values must be integers or floats")
-
-    if not np.isfinite(truth["truth"].to_numpy()).all():
-        raise ValueError("truth contains non-finite values")
-
-    actual_targets = set(truth["target"].to_list())
-    expected_targets = set(_SCORED_DEFAULT)
-
-    missing_targets = expected_targets - actual_targets
-    if missing_targets:
-        raise ValueError(f"Truth missing scored targets: {sorted(missing_targets)}")
-
-    unexpected_targets = actual_targets - expected_targets
-    if unexpected_targets:
-        raise ValueError(f"Truth contains unexpected targets: {sorted(unexpected_targets)}")
-
-    duplicate_keys = (
-        truth.group_by(["inchikey_full", "target"])
-        .len()
-        .filter(pl.col("len") > 1)
-    )
-    if not duplicate_keys.is_empty():
-        raise ValueError("truth contains duplicate molecule/target keys")
-
-    # Conversion preserves the correct ID → target → prediction mapping
-    prediction_rows = []
-
-    for target in _SCORED_DEFAULT:
-        for molecule, value in predictions.select(
-            "inchikey_full", target
-        ).iter_rows():
-            prediction_rows.append({
-                "model_id": model_id, 
-                "inchikey_full": molecule,
-                "target": target,
-                "pred": value,
-            })
-     
-    converted = pl.DataFrame(
-        prediction_rows,
-        schema={
-            "model_id": pl.String,
-            "inchikey_full": pl.String,
-            "target": pl.String,
-            "pred": pl.Float64,
-        }
-    )
-
-    keys = ["inchikey_full", "target"]
-    expected_keys = truth.select(keys)
-
-    missing = expected_keys.join(
-        converted.select(keys),
-        on=keys,
-        how="anti",
-    )
-    if not missing.is_empty():
-        raise ValueError("Missing predictions for validation truth keys")
-
-    converted = converted.join(
-        expected_keys, 
-        on=keys,
-        how="semi"
-    )
-
-    if converted["pred"].null_count() > 0:
-        raise ValueError("Validation predictions contain null values")
-
-    if not np.isfinite(converted["pred"].to_numpy()).all():
-        raise ValueError("Validation predictions contain non-finite values")
-        
-    return converted
-
-
 def run_validation_seeds(
     *, 
     df: pl.DataFrame, 
@@ -653,10 +245,6 @@ def run_validation_seeds(
     input_names: list[str] | None = None,
     output_dir: Path,
     cache_dir: Path | None = None,
-    chemprop_config: dict | None = None,
-    group_column: str | None = None,
-    validation_fraction: float | None = None,
-    validation_seed: int | None = None, 
     seeds: list[int],
     targets: list[str]
 ) -> tuple[dict[int, pl.DataFrame], pl.DataFrame]:
@@ -664,8 +252,7 @@ def run_validation_seeds(
 
     Feature models must support random state.
 
-    Chemprop requires its config and internal-split settings. targets applies
-    to feature based models. Chemprop uses target_columns from its config.
+    targets lists the target columns to predict.
     """
 
     if len(seeds) < 3:
@@ -682,58 +269,33 @@ def run_validation_seeds(
     first_truth = None
 
     for seed in seeds:
-        chemprop_config_copy = None
         model_params_copy = None
-        if model_name == "chemprop":
-            if not isinstance(chemprop_config, dict):
-                raise ValueError("chemprop_config must be dict")
-            chemprop_config_copy = chemprop_config.copy()
-            chemprop_config_copy["seed"] = seed
-            resolved_config = _resolve_chemprop_config(chemprop_config_copy)
+        if input_names is None:
+            raise ValueError("input_names are required")
+        if cache_dir is None:
+            raise ValueError("cache_dir is required")
+        if model_params is None:
+            model_params_copy = {}
+        else:
+            if not isinstance(model_params, dict):
+                raise ValueError("model_params must be dict")
+            model_params_copy = model_params.copy()
+        model_params_copy["random_state"] = seed
 
-            if not isinstance(model_id, str) or not model_id.strip():
-                raise ValueError("model_id must be a nonblank string")
-            
-            seed_model_id = f"{model_id}_seed{seed}"
-            seed_output_dir = output_dir / f"seed-{seed}"
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError("model_id must be a nonblank string")
 
-            predictions, truth = validation_prediction_chemprop(
-                df=df,
-                model_id=seed_model_id,
-                work_dir=seed_output_dir,
-                group_column=group_column,
-                validation_fraction=validation_fraction,
-                validation_seed=validation_seed,
-                **resolved_config,
-            )
-    
-        else: 
-            if input_names is None:
-                raise ValueError("input_names are required")
-            if cache_dir is None:
-                raise ValueError("cache_dir is required")
-            if model_params is None:
-                model_params_copy = {}
-            else:
-                if not isinstance(model_params, dict):
-                    raise ValueError("model_params must be dict")
-                model_params_copy = model_params.copy()
-            model_params_copy["random_state"] = seed
+        seed_model_id = f"{model_id}_seed{seed}"
 
-            if not isinstance(model_id, str) or not model_id.strip():
-                raise ValueError("model_id must be a nonblank string")
-
-            seed_model_id = f"{model_id}_seed{seed}"
-
-            predictions, truth = validation_prediction(
-                df=df,
-                model_name=model_name, 
-                model_id=seed_model_id, 
-                model_params=model_params_copy,
-                input_names=input_names,
-                targets=targets,
-                cache_dir=cache_dir,
-            )
+        predictions, truth = validation_prediction(
+            df=df,
+            model_name=model_name, 
+            model_id=seed_model_id, 
+            model_params=model_params_copy,
+            input_names=input_names,
+            targets=targets,
+            cache_dir=cache_dir,
+        )
 
         predictions_by_seed[seed] = predictions
 

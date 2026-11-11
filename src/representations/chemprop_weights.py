@@ -2,7 +2,7 @@
 
 Selected as `chemprop[/path/to/weights]` (or `chemprop[alias]`, see foundation_alias) wherever an input name is accepted.
 The weights can be a chemprop model file (`best*.pt`, as written by
-`chemprop train` / `train-chemprop`), a Lightning `.ckpt`, or a message-passing-only
+`chemprop train` / `train-model --model chemprop`), a Lightning `.ckpt`, or a message-passing-only
 checkpoint like CheMeleon's. The fingerprint is the aggregated (and batch-normed)
 graph embedding; the prediction head is not used.
 """

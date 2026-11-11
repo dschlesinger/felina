@@ -11,7 +11,6 @@ from polars.testing import assert_frame_equal
 
 import models.validation as validation
 from models.validation import (
-    _convert_chemprop_predictions_validation,
     validation_prediction,
 )
 
@@ -575,687 +574,6 @@ def test_validation_rejects_invalid_predictions(
         )
 
 
-@pytest.mark.parametrize("shared_block", [False, True])
-def test_chemprop_validation_outputs(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    shared_block: bool,
-):
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
-
-    df = pl.DataFrame({
-        "inchikey_full": [
-            "TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full",
-            "VAL_A-full", "VAL_B-full",
-        ],
-        "inchikey_block": [
-            "TRAIN_A", "TRAIN_B", "TRAIN_C", "VAL_A", "VAL_B"
-        ],
-        "SMILES": ["C", "CC", "CCC", "CCCC", "CCCCC"],
-        "split": ["train", "train", "train", "val", "val"],
-        **{
-            target: [5.0, 6.0, 7.0, 5.5, 6.5]
-            for target in targets
-        },
-    })
-
-    if shared_block:
-        df = df.with_columns(
-            pl.when(pl.col("split") == "val")
-            .then(pl.lit("VAL_SHARED"))
-            .otherwise(pl.col("inchikey_block"))
-            .alias("inchikey_block")
-        )
-
-    val_df = df.filter(pl.col("split") == "val")
-
-    expected_truth = pl.DataFrame([
-        {
-            "inchikey_full": row["inchikey_full"],
-            "target": target,
-            "truth": row[target],
-        }
-        for row in val_df.iter_rows(named=True)
-        for target in targets
-    ])
-
-    calls = []
-
-    native_predictions = val_df.select(
-        "inchikey_full", "SMILES"
-    ).with_columns([
-        pl.Series(target, [1.0 +i, 2.0+i])
-        for i, target in enumerate(targets)
-    ])
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd[1])
-
-        if cmd[1] == "train":
-            output_dir = Path(cmd[cmd.index("--output-dir") + 1])
-            model_path = output_dir / "model_0" / "best.pt"
-            model_path.parent.mkdir(parents=True)
-            model_path.touch()
-
-        elif cmd[1] == "predict":
-            predictions_path = Path(cmd[cmd.index("--preds-path") + 1])
-            native_predictions.write_csv(predictions_path)
-
-        else:
-            pytest.fail(f"Unexpected command: {cmd}")
-
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        "models.validation.subprocess.run",
-        fake_run,
-    )
-
-    predictions,truth = validation.validation_prediction_chemprop(
-        df=df,
-        model_id="chemprop_test",
-        work_dir=tmp_path / "validation",
-        target_columns=targets,
-        epochs=2,
-        seed=42,
-        group_column="inchikey_block",
-        validation_fraction=1 / 3,
-        validation_seed=42,
-    )
-
-    assert calls == ["train", "predict"]
-
-    expected_values = {
-        (molecule, target): value
-        for i, target in enumerate(targets)
-        for molecule, value in [
-            ("VAL_A-full", 1.0 + i),
-            ("VAL_B-full", 2.0 + i),
-        ]
-    }
-
-    actual_values = {
-        (row["inchikey_full"], row["target"]): row["pred"]
-        for row in predictions.iter_rows(named=True)
-    }
-
-    assert actual_values == expected_values
-
-    assert predictions.height == 8
-    
-    assert set(predictions.columns) == {
-        "model_id", "inchikey_full", "target", "pred"
-    }
-
-    assert predictions["model_id"].to_list() == ["chemprop_test"] * 8
-
-    keys = ["inchikey_full", "target"]
-    assert_frame_equal(
-        truth.sort(keys),
-        expected_truth.sort(keys),
-    )
-    assert_frame_equal(
-        predictions.select(keys).sort(keys),
-        truth.select(keys).sort(keys),
-    )
-
-    assert predictions["pred"].dtype.is_numeric()
-    assert predictions["pred"].null_count() == 0
-    assert np.isfinite(predictions["pred"].to_numpy()).all()
-
-
-def test_chemprop_validation_respects_splits(monkeypatch, tmp_path):
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
-
-    df = pl.DataFrame({
-        "inchikey_full": [
-            "TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full",
-            "VAL_A-full", "VAL_B-full", "TEST_A-full",
-        ],
-        "inchikey_block": [
-            "TRAIN_A", "TRAIN_B", "TRAIN_C", "VAL_A", "VAL_B", "TEST_A"
-        ],
-        "SMILES": ["C", "CC", "CCC", "CCCC", "CCCCC", "CCCCCC"],
-        "split": ["train", "train", "train", "val", "val", "test"],
-        **{
-            target: [5.0, 6.0, 7.0, 5.5, 6.5, 8.0]
-            for target in targets
-        },
-    })
-
-    val_df = df.filter(pl.col("split") == "val")
-
-    calls = []
-
-    native_predictions = val_df.select(
-        "inchikey_full", "SMILES"
-    ).with_columns([
-        pl.Series(target, [1.0 +i, 2.0+i])
-        for i, target in enumerate(targets)
-    ])
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd[1])
-
-        if cmd[1] == "train":
-            output_dir = Path(cmd[cmd.index("--output-dir") + 1])
-            model_path = output_dir / "model_0" / "best.pt"
-            model_path.parent.mkdir(parents=True)
-            model_path.touch()
-            
-            training_path = Path(cmd[cmd.index("--data-path") + 1])
-            training_data = pl.read_csv(training_path)
-
-            assert set(training_data["inchikey_full"]) == {
-                "TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"
-            }
-
-            fit_ids = set(
-                training_data.filter(pl.col("split") == "train")["inchikey_full"]
-            )
-            internal_val_ids = set(
-                training_data.filter(pl.col("split") == "val")["inchikey_full"]
-            )
-
-            assert fit_ids
-            assert internal_val_ids
-            assert fit_ids.isdisjoint(internal_val_ids)
-            assert fit_ids | internal_val_ids == {"TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"}
-
-        elif cmd[1] == "predict":
-            prediction_input_path = Path(cmd[cmd.index("--test-path") + 1])
-            prediction_input = pl.read_csv(prediction_input_path)
-
-            assert set(prediction_input["inchikey_full"]) == {"VAL_A-full", "VAL_B-full"}
-            assert set(prediction_input.columns) == {"inchikey_full", "SMILES"}
-
-            predictions_path = Path(cmd[cmd.index("--preds-path") + 1])
-            native_predictions.write_csv(predictions_path)
-        else:
-            pytest.fail(f"Unexpected command: {cmd}")
-
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        "models.validation.subprocess.run",
-        fake_run,
-    )
-
-    predictions,truth = validation.validation_prediction_chemprop(
-        df=df,
-        model_id="chemprop_test",
-        work_dir=tmp_path / "validation",
-        target_columns=targets,
-        epochs=2,
-        seed=42,
-        group_column="inchikey_block",
-        validation_fraction=1 / 3,
-        validation_seed=42,
-    )
-
-    assert set(predictions["inchikey_full"]) == {"VAL_A-full", "VAL_B-full"}
-    assert set(truth["inchikey_full"]) == {"VAL_A-full", "VAL_B-full"}
-    assert calls == ["train", "predict"]
-
-
-@pytest.fixture
-def chemprop_validation_setup(tmp_path):
-    targets = list(validation._SCORED_DEFAULT)
-
-    df = pl.DataFrame({
-        "inchikey_full": [
-            "TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full",
-            "VAL_A-full", "VAL_B-full", "TEST_A-full",
-        ],
-        "inchikey_block": [
-            "TRAIN_A", "TRAIN_B", "TRAIN_C",
-            "VAL_A", "VAL_B", "TEST_A",
-        ],
-        "SMILES": ["C", "CC", "CCC", "CCCC", "CCCCC", "CCCCCC"],
-        "split": ["train", "train", "train", "val", "val", "test"],
-        **{
-            target: [5.0, 6.0, 7.0, 5.5, 6.5, 8.0]
-            for target in targets
-        },
-    })
-
-    return {
-        "df": df,
-        "model_id": "chemprop_test",
-        "work_dir": tmp_path / "validation",
-        "target_columns": targets,
-        "epochs": 2,
-        "seed": 42,
-        "group_column": "inchikey_block",
-        "validation_fraction": 1 / 3,
-        "validation_seed": 42,
-    }
-
-@pytest.fixture
-def fake_validation_chemprop(monkeypatch):
-    """Install a fake CLI with optional failures or missing artifacts."""
-    def install(*, fail=None, omit=None):
-        calls = []
-
-        def fake_run(cmd, **kwargs):
-            stage = cmd[1]
-            calls.append(stage)
-
-            if stage == fail:
-                return subprocess.CompletedProcess(
-                    cmd, returncode=1, stdout="", stderr="simulated failure"
-                )
-
-            if stage == "train":
-                if omit != "model":
-                    output_dir = Path(cmd[cmd.index("--output-dir") + 1])
-                    checkpoint = output_dir / "model_0" / "best.pt"
-                    checkpoint.parent.mkdir(parents=True)
-                    checkpoint.touch()
-
-            elif stage == "predict":
-                if omit != "predictions":
-                    input_path = Path(cmd[cmd.index("--test-path") + 1])
-                    output_path = Path(cmd[cmd.index("--preds-path") + 1])
-
-                    native = pl.read_csv(input_path).with_columns([
-                        pl.lit(5.0 + i).alias(target)
-                        for i, target in enumerate(validation._SCORED_DEFAULT)
-                    ])
-                    native.write_csv(output_path)
-
-            else:
-                pytest.fail(f"Unexpected command: {cmd}")
-
-            return subprocess.CompletedProcess(
-                cmd, returncode=0, stdout="", stderr=""
-            )
-
-        monkeypatch.setattr("models.validation.subprocess.run", fake_run)
-        return calls
-
-    return install
-
-def test_validation_seeds_forwards_nondefault_chemprop_settings(
-    chemprop_validation_setup, fake_validation_chemprop, monkeypatch,
-):
-    setup = chemprop_validation_setup
-    stages = fake_validation_chemprop()
-    fake_run = validation.subprocess.run
-    commands = []
-
-    def capture_command(cmd, **kwargs):
-        commands.append(list(cmd))
-        return fake_run(cmd, **kwargs)
-
-    monkeypatch.setattr(validation.subprocess, "run", capture_command)
-    config = {
-        "target_columns": setup["target_columns"], "epochs": 3,
-        "from_foundation": None, "accelerator": "cuda", "devices": 2,
-        "num_workers": 2, "batch_size": 32, "warmup_epochs": 1,
-    }
-    original = deepcopy(config)
-    predictions, truth = validation.run_validation_seeds(
-        df=setup["df"], model_name="chemprop", model_id=setup["model_id"],
-        output_dir=setup["work_dir"], chemprop_config=config,
-        group_column=setup["group_column"],
-        validation_fraction=setup["validation_fraction"],
-        validation_seed=setup["validation_seed"],
-        seeds=[11, 22, 33], targets=setup["target_columns"],
-    )
-
-    assert stages == ["train", "predict"] * 3
-    assert set(predictions) == {11, 22, 33}
-    assert not truth.is_empty()
-    assert config == original
-    for cmd in commands:
-        for flag, expected in {
-            "--accelerator": "cuda", "--devices": "2",
-            "--num-workers": "2", "--batch-size": "32",
-        }.items():
-            assert cmd.count(flag) == 1
-            assert cmd[cmd.index(flag) + 1] == expected
-        if cmd[1] == "train":
-            assert cmd[cmd.index("--warmup-epochs") + 1] == "1"
-        else:
-            assert "--warmup-epochs" not in cmd
-
-
-def test_chemprop_validation_missing_labels(
-    chemprop_validation_setup,
-    fake_validation_chemprop,
-):
-    kwargs = chemprop_validation_setup
-    target = kwargs["target_columns"][0]
-
-    kwargs["df"] = kwargs["df"].with_columns(
-        pl.when(pl.col("inchikey_full").is_in(["TRAIN_A-full", "VAL_A-full"]))
-        .then(pl.lit(None, dtype=pl.Float64))
-        .otherwise(pl.col(target))
-        .alias(target)
-    )
-
-    calls = fake_validation_chemprop()
-    predictions, truth = validation.validation_prediction_chemprop(**kwargs)
-
-    keys = ["inchikey_full", "target"]
-    expected_keys = pl.DataFrame([
-        {"inchikey_full": molecule, "target": name}
-        for molecule in ["VAL_A-full", "VAL_B-full"]
-        for name in kwargs["target_columns"]
-        if not (molecule == "VAL_A-full" and name == target)
-    ])
-
-    assert_frame_equal(
-        predictions.select(keys).sort(keys),
-        expected_keys.sort(keys),
-    )
-    assert_frame_equal(
-        truth.select(keys).sort(keys),
-        expected_keys.sort(keys),
-    )
-    assert truth["truth"].null_count() == 0
-    assert calls == ["train", "predict"]
-
-@pytest.mark.parametrize("stage", ["train", "predict"])
-def test_chemprop_validation_command_failures(
-    chemprop_validation_setup,
-    fake_validation_chemprop,
-    stage,
-):
-    calls = fake_validation_chemprop(fail=stage)
-
-    with pytest.raises(RuntimeError, match="simulated failure"):
-        validation.validation_prediction_chemprop(**chemprop_validation_setup)
-
-    expected_calls = ["train"] if stage == "train" else ["train", "predict"]
-    assert calls == expected_calls
-
-@pytest.mark.parametrize(
-    "case, match",
-    [
-        ("missing_split", "split column must exist"),
-        ("missing_smiles", "missing required columns"),
-        ("duplicate_id", "duplicate molecule IDs"),
-        ("overlap", "Training and validation molecules overlap"),
-        ("empty_train", "train_df is empty"),
-        ("empty_val", "val_df is empty"),
-        ("no_train_labels", "No training labels"),
-        ("no_val_labels", "No validation labels"),
-        ("infinite_label", "infinite values"),
-        ("blank_model_id", "model_id must be"),
-        ("nonempty_work_dir", "work_dir must be empty"),
-    ],
-)
-
-def test_chemprop_validation_invalid_inputs(
-    chemprop_validation_setup,
-    monkeypatch,
-    case,
-    match,
-):
-    kwargs = chemprop_validation_setup
-    df = kwargs["df"]
-    target = kwargs["target_columns"][0]
-
-    if case == "missing_split":
-        df = df.drop("split")
-    elif case == "missing_smiles":
-        df = df.drop("SMILES")
-    elif case == "duplicate_id":
-        df = pl.concat([df, df.head(1)])
-    elif case == "overlap":
-        df = df.with_columns(
-            pl.when(pl.col("inchikey_block") == "VAL_A")
-            .then(pl.lit("TRAIN_A"))
-            .otherwise(pl.col("inchikey_block"))
-            .alias("inchikey_block")
-        )
-    elif case == "empty_train":
-        df = df.filter(pl.col("split") != "train")
-    elif case == "empty_val":
-        df = df.filter(pl.col("split") != "val")
-    elif case in {"no_train_labels", "no_val_labels"}:
-        population = "train" if case == "no_train_labels" else "val"
-        df = df.with_columns(
-            pl.when(pl.col("split") == population)
-            .then(pl.lit(None, dtype=pl.Float64))
-            .otherwise(pl.col(target))
-            .alias(target)
-        )
-    elif case == "infinite_label":
-        df = df.with_columns(pl.lit(float("inf")).alias(target))
-    elif case == "blank_model_id":
-        kwargs["model_id"] = " "
-    elif case == "nonempty_work_dir":
-        kwargs["work_dir"].mkdir()
-        (kwargs["work_dir"] / "existing.txt").touch()
-
-    kwargs["df"] = df
-
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("Chemprop must not run for invalid inputs")
-
-    monkeypatch.setattr("models.validation.subprocess.run", fail_if_called)
-
-    with pytest.raises(ValueError, match=match):
-        validation.validation_prediction_chemprop(**kwargs)
-
-
-@pytest.mark.parametrize(
-    "artifact, match, expected_calls",
-    [
-        ("model", "did not produce a model", ["train"]),
-        ("predictions", "did not produce predictions", ["train", "predict"]),
-    ],
-)
-def test_chemprop_validation_missing_artifacts(
-    chemprop_validation_setup,
-    fake_validation_chemprop,
-    artifact,
-    match,
-    expected_calls,
-):
-    calls = fake_validation_chemprop(omit=artifact)
-
-    with pytest.raises(FileNotFoundError, match=match):
-        validation.validation_prediction_chemprop(**chemprop_validation_setup)
-
-    assert calls == expected_calls
-
-@pytest.fixture
-def chemprop_conversion_tables():
-    targets = list(validation._SCORED_DEFAULT)
-
-    predictions = pl.DataFrame({
-        "inchikey_full": ["A", "B"],
-        **{
-            target: [5.0 + i, 6.0 + i]
-            for i, target in enumerate(targets)
-        },
-    })
-
-    truth = pl.DataFrame([
-        {
-            "inchikey_full": molecule,
-            "target": target,
-            "truth": value,
-        }
-        for molecule, value in [("A", 5.5), ("B", 6.5)]
-        for target in targets
-    ])
-
-    return predictions, truth
-
-
-def test_convert_chemprop_validation_aligns_keys(chemprop_conversion_tables):
-    predictions, truth = chemprop_conversion_tables
-    target = validation._SCORED_DEFAULT[0]
-
-    # No observed label for this one molecule/target pair.
-    truth = truth.filter(
-        ~(
-            (pl.col("inchikey_full") == "A")
-            & (pl.col("target") == target)
-        )
-    )
-
-    expected = pl.DataFrame([
-        {
-            "model_id": "chemprop_test",
-            "inchikey_full": row["inchikey_full"],
-            "target": name,
-            "pred": row[name],
-        }
-        for row in predictions.iter_rows(named=True)
-        for name in validation._SCORED_DEFAULT
-        if not (row["inchikey_full"] == "A" and name == target)
-    ])
-
-    result = validation._convert_chemprop_predictions_validation(
-        predictions=predictions.sample(fraction=1.0, shuffle=True, seed=10),
-        truth=truth.sample(fraction=1.0, shuffle=True, seed=20),
-        model_id="chemprop_test",
-    )
-
-    keys = ["inchikey_full", "target"]
-    assert_frame_equal(result.sort(keys), expected.sort(keys))
-
-
-@pytest.mark.parametrize(
-    "case, match",
-    [
-        ("missing_id", "Missing prediction columns"),
-        ("missing_target", "Missing prediction columns"),
-        ("duplicate_id", "duplicate molecules IDs"),
-        ("missing_molecule", "Missing predictions"),
-        ("null_id", "contains nulls"),
-        ("blank_id", "blank identifiers"),
-        ("nonnumeric", "must be numeric"),
-        ("null_prediction", "contain null"),
-        ("nan_prediction", "non-finite"),
-        ("infinite_prediction", "non-finite"),
-    ],
-)
-def test_convert_chemprop_validation_invalid_predictions(
-    chemprop_conversion_tables,
-    case,
-    match,
-):
-    predictions, truth = chemprop_conversion_tables
-    target = validation._SCORED_DEFAULT[0]
-
-    if case == "missing_id":
-        predictions = predictions.drop("inchikey_full")
-    elif case == "missing_target":
-        predictions = predictions.drop(target)
-    elif case == "duplicate_id":
-        predictions = pl.concat([predictions, predictions.head(1)])
-    elif case == "missing_molecule":
-        predictions = predictions.head(1)
-    elif case in {"null_id", "blank_id"}:
-        predictions = predictions.with_columns(
-            pl.Series(
-                "inchikey_full",
-                [None if case == "null_id" else " ", "B"],
-                dtype=pl.String,
-            )
-        )
-    elif case == "nonnumeric":
-        predictions = predictions.with_columns(pl.lit("bad").alias(target))
-    else:
-        value = {
-            "null_prediction": None,
-            "nan_prediction": float("nan"),
-            "infinite_prediction": float("inf"),
-        }[case]
-        predictions = predictions.with_columns(
-            pl.lit(value, dtype=pl.Float64).alias(target)
-        )
-
-    with pytest.raises(ValueError, match=match):
-        validation._convert_chemprop_predictions_validation(
-            predictions=predictions,
-            truth=truth,
-            model_id="chemprop_test",
-        )
-
-
-@pytest.mark.parametrize(
-    "case, match",
-    [
-        ("missing_column", "missing required columns"),
-        ("empty", "truth table is empty"),
-        ("duplicate_key", "duplicate molecule/target keys"),
-        ("missing_target", "missing scored targets"),
-        ("unexpected_target", "unexpected targets"),
-        ("null_truth", "contains null"),
-        ("nonnumeric_truth", "integers or floats"),
-        ("nan_truth", "non-finite"),
-        ("infinite_truth", "non-finite"),
-        ("blank_id", "blanks identifiers"),
-    ],
-)
-def test_convert_chemprop_validation_invalid_truth(
-    chemprop_conversion_tables,
-    case,
-    match,
-):
-    predictions, truth = chemprop_conversion_tables
-    target = validation._SCORED_DEFAULT[0]
-
-    if case == "missing_column":
-        truth = truth.drop("truth")
-    elif case == "empty":
-        truth = truth.head(0)
-    elif case == "duplicate_key":
-        truth = pl.concat([truth, truth.head(1)])
-    elif case == "missing_target":
-        truth = truth.filter(pl.col("target") != target)
-    elif case == "unexpected_target":
-        extra = truth.head(1).with_columns(pl.lit("unexpected").alias("target"))
-        truth = pl.concat([truth, extra])
-    elif case == "nonnumeric_truth":
-        truth = truth.with_columns(pl.lit("bad").alias("truth"))
-    elif case == "blank_id":
-        truth = truth.with_columns(pl.lit(" ").alias("inchikey_full"))
-    else:
-        value = {
-            "null_truth": None,
-            "nan_truth": float("nan"),
-            "infinite_truth": float("inf"),
-        }[case]
-        truth = truth.with_columns(
-            pl.lit(value, dtype=pl.Float64).alias("truth")
-        )
-
-    with pytest.raises(ValueError, match=match):
-        validation._convert_chemprop_predictions_validation(
-            predictions=predictions,
-            truth=truth,
-            model_id="chemprop_test",
-        )
-
 @pytest.fixture
 def validation_seed_setup(tmp_path, monkeypatch):
     targets = list(validation._SCORED_DEFAULT)
@@ -1278,8 +596,6 @@ def validation_seed_setup(tmp_path, monkeypatch):
         for target in targets
     ])
 
-    checkpoint = tmp_path / "example.pt"
-    checkpoint.touch()
     kwargs = {
         "df": df,
         "model_name": "random_forest",
@@ -1289,17 +605,6 @@ def validation_seed_setup(tmp_path, monkeypatch):
         "input_names": ["test_features"],
         "output_dir": tmp_path / "runs",
         "cache_dir": tmp_path / "features",
-        "chemprop_config": {
-            "target_columns": targets,
-            "epochs": 2,
-            "seed": 999,
-            "from_foundation": str(checkpoint.resolve()),
-            "training_timeout": 123,
-            "prediction_timeout": 456,
-        },
-        "group_column": "inchikey_block",
-        "validation_fraction": 0.2,
-        "validation_seed": 42,
         "seeds": [11, 22, 33],
         "targets": targets,
     }
@@ -1310,11 +615,7 @@ def validation_seed_setup(tmp_path, monkeypatch):
 
     def fake_run(**call):
         calls.append(call)
-        seed = (
-            call["seed"]
-            if "seed" in call
-            else call["model_params"]["random_state"]
-        )
+        seed = call["model_params"]["random_state"]
 
         predictions = truth.select("inchikey_full", "target").with_columns(
             pl.lit(call["model_id"]).alias("model_id"),
@@ -1334,11 +635,10 @@ def validation_seed_setup(tmp_path, monkeypatch):
         return predictions, run_truth
 
     monkeypatch.setattr(validation, "validation_prediction", fake_run)
-    monkeypatch.setattr(validation, "validation_prediction_chemprop", fake_run)
 
     return kwargs, calls, truth, returned_predictions, state
 
-@pytest.mark.parametrize("model_name", ["random_forest", "chemprop"])
+@pytest.mark.parametrize("model_name", ["random_forest"])
 def test_validation_seeds_runs_each_seed(validation_seed_setup, model_name):
     kwargs, calls, expected_truth, returned_predictions, _ = validation_seed_setup
     kwargs["model_name"] = model_name
@@ -1353,48 +653,28 @@ def test_validation_seeds_runs_each_seed(validation_seed_setup, model_name):
         assert call["model_id"] == f"example_seed{seed}"
         assert_frame_equal(predictions[seed], returned_predictions[seed])
 
-        if model_name == "chemprop":
-            config = kwargs["chemprop_config"]
-            assert call["seed"] == seed
-            assert call["work_dir"] == kwargs["output_dir"] / f"seed-{seed}"
-            assert call["target_columns"] == config["target_columns"]
-            assert call["epochs"] == config["epochs"]
-            assert call["from_foundation"] == config["from_foundation"]
-            assert call["training_timeout"] == config["training_timeout"]
-            assert call["prediction_timeout"] == config["prediction_timeout"]
-            assert call["group_column"] == kwargs["group_column"]
-            assert call["validation_fraction"] == kwargs["validation_fraction"]
-            assert call["validation_seed"] == kwargs["validation_seed"]
-            for name, expected in {
-                "accelerator": "cpu", "devices": 1, "num_workers": 0,
-                "batch_size": 4, "warmup_epochs": 0,
-            }.items():
-                assert call[name] == expected
-        else:
-            assert call["model_name"] == model_name
-            assert call["model_params"] == {
-                "n_estimators": 10,
-                "random_state": seed,
-            }
-            assert call["input_names"] == kwargs["input_names"]
-            assert call["targets"] == kwargs["targets"]
-            assert call["cache_dir"] == kwargs["cache_dir"]
+        assert call["model_name"] == model_name
+        assert call["model_params"] == {
+            "n_estimators": 10,
+            "random_state": seed,
+        }
+        assert call["input_names"] == kwargs["input_names"]
+        assert call["targets"] == kwargs["targets"]
+        assert call["cache_dir"] == kwargs["cache_dir"]
 
     keys = ["inchikey_full", "target"]
     assert_frame_equal(truth, expected_truth.sort(keys))
 
-@pytest.mark.parametrize("model_name", ["random_forest", "chemprop"])
+@pytest.mark.parametrize("model_name", ["random_forest"])
 def test_validation_seeds_preserves_configs(validation_seed_setup, model_name):
     kwargs, calls, _, _, _ = validation_seed_setup
     kwargs["model_name"] = model_name
 
     original_params = deepcopy(kwargs["model_params"])
-    original_config = deepcopy(kwargs["chemprop_config"])
 
     validation.run_validation_seeds(**kwargs)
 
     assert kwargs["model_params"] == original_params
-    assert kwargs["chemprop_config"] == original_config
 
     if model_name == "random_forest":
         copies = [call["model_params"] for call in calls]
@@ -1410,11 +690,9 @@ def test_validation_seeds_preserves_configs(validation_seed_setup, model_name):
         ("random_forest", {"seeds": [1, 2, 3.0]}, "integers"),
         ("random_forest", {"seeds": [1, 2, "3"]}, "integers"),
         ("random_forest", {"model_id": " "}, "nonblank string"),
-        ("chemprop", {"model_id": None}, "nonblank string"),
         ("random_forest", {"input_names": None}, "input_names are required"),
         ("random_forest", {"cache_dir": None}, "cache_dir is required"),
         ("random_forest", {"model_params": []}, "model_params must be dict"),
-        ("chemprop", {"chemprop_config": None}, "chemprop_config must be dict"),
     ],
 )
 def test_validation_seeds_rejects_invalid_inputs(
@@ -1432,7 +710,7 @@ def test_validation_seeds_rejects_invalid_inputs(
 
     assert calls == []
 
-@pytest.mark.parametrize("model_name", ["random_forest", "chemprop"])
+@pytest.mark.parametrize("model_name", ["random_forest"])
 @pytest.mark.parametrize("truth_case", ["shuffled", "changed"])
 def test_validation_seeds_checks_truth(
     validation_seed_setup,

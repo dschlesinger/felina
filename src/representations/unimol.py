@@ -3,7 +3,7 @@
 Uses a Uni-Mol v1 encoder to generate 512-dimensional molecular representations from SMILES. By default this is
 the pretrained encoder, selected as `unimol`. A fine-tuned model is selected as `unimol[/path/to/model_0.pth]`
 (or `unimol[alias]`, see foundation_alias) wherever an input name is accepted: the weights are the `model_0.pth`
-written by `train-unimol`, and the fingerprint is the encoder's CLS embedding; the regression head is not used.
+written by `train-model --model unimol`, and the fingerprint is the encoder's CLS embedding; the regression head is not used.
 """
 
 import os

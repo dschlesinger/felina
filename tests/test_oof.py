@@ -22,7 +22,6 @@ from models.oof import (
     _validate_inputs,
     _write_fold_artifacts,
     _load_oof_data,
-    _convert_chemprop_predictions,
 )
 
 
@@ -38,7 +37,7 @@ def test_cli_accepts_checkpoint_input(tmp_path, monkeypatch, use_alias):
     calls = []
     monkeypatch.setattr(oof, "run_oof", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setattr(sys, "argv", [
-        "generate-oof", "--data-path", "data.csv", "--folds-path", "folds.csv",
+        "python -m models.oof", "--data-path", "data.csv", "--folds-path", "folds.csv",
         "--model-name", "decision_tree", "--model-id", "tree",
         "--input-names", name, "--output-dir", "run", "--cache-dir", "features",
     ])
@@ -2023,7 +2022,7 @@ def test_cli_forwards_valid_arguments(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(oof, "run_oof", fake_run_oof)
     monkeypatch.setattr(sys, "argv", [
-        "generate-oof",
+        "python -m models.oof",
         "--data-path", str(tmp_path / "data.csv"),
         "--folds-path", str(tmp_path / "folds.csv"),
         "--model-name", "decision_tree",
@@ -2055,7 +2054,7 @@ def test_cli_rejects_malformed_model_params_json(monkeypatch, capsys, tmp_path) 
 
     monkeypatch.setattr(oof, "run_oof", fake_run_oof)
     monkeypatch.setattr(sys, "argv", [
-        "generate-oof",
+        "python -m models.oof",
         "--data-path", str(tmp_path / "data.csv"),
         "--folds-path", str(tmp_path / "folds.csv"),
         "--model-name", "decision_tree",
@@ -2082,7 +2081,7 @@ def test_cli_rejects_non_object_model_params(monkeypatch, capsys, tmp_path) -> N
 
     monkeypatch.setattr(oof, "run_oof", fake_run_oof)
     monkeypatch.setattr(sys, "argv", [
-        "generate-oof",
+        "python -m models.oof",
         "--data-path", str(tmp_path / "data.csv"),
         "--folds-path", str(tmp_path / "folds.csv"),
         "--model-name", "decision_tree",
@@ -2118,7 +2117,7 @@ def test_cli_rejects_unknown_model_or_feature(
 
     monkeypatch.setattr(oof, "run_oof", fake_run_oof)
     monkeypatch.setattr(sys, "argv", [
-        "generate-oof",
+        "python -m models.oof",
         "--data-path", str(tmp_path / "data.csv"),
         "--folds-path", str(tmp_path / "folds.csv"),
         "--model-name", model_name,
@@ -2138,142 +2137,6 @@ def test_cli_rejects_unknown_model_or_feature(
         assert "argument --model-name: invalid choice" in error
     else:
         assert "--input-names: unknown input(s)" in error
-    assert calls == []
-
-
-def test_cli_forwards_chemprop_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    calls = []
-    
-    def fake_run_oof(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(oof, "run_oof", fake_run_oof)
-
-    config = {
-        "epochs": 2, 
-        "seed": 42, 
-        "from_foundation": None, 
-        "target_columns": list(oof._SCORED_DEFAULT),
-    }
-    monkeypatch.setattr(sys, "argv", [
-        "generate-oof",
-        "--data-path", str(tmp_path / "data.csv"),
-        "--folds-path", str(tmp_path / "folds.csv"),
-        "--model-name", "chemprop",
-        "--model-id", "chemprop_test",
-        "--output-dir", str(tmp_path / "output"),
-        "--chemprop-config", json.dumps(config),
-        "--group-column", "group_id",
-        "--validation-fraction", "0.1",
-        "--validation-seed", "42",
-    ])
-
-    oof.main()
-
-    assert len(calls) == 1
-    assert calls[0]["model_name"] == "chemprop"
-    assert calls[0]["model_id"] == "chemprop_test"
-    assert calls[0]["chemprop_config"] == config
-    assert calls[0]["group_column"] == "group_id"
-    assert calls[0]["validation_fraction"] == 0.1
-    assert calls[0]["validation_seed"] == 42
-    assert calls[0]["input_names"] is None
-    assert calls[0]["cache_dir"] is None
-    assert calls[0]["model_params"] == {}
-    
-@pytest.mark.parametrize(
-    "config_text, expected_error",
-    [
-        ("{'epochs': 2}", "--chemprop-config must be valid JSON"),
-        ('{"epochs": 2', "--chemprop-config must be valid JSON"),
-        ("[]", "--chemprop-config must be a JSON object"),
-        ("null", "--chemprop-config must be a JSON object"),
-    ],
-)
-def test_cli_rejects_invalid_chemprop_json(
-    monkeypatch: pytest.MonkeyPatch, 
-    capsys,
-    tmp_path,
-    config_text, 
-    expected_error
-):
-    calls = []
-    
-    def fake_run_oof(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(oof, "run_oof", fake_run_oof)
-    monkeypatch.setattr(sys, "argv", [
-        "generate-oof",
-        "--data-path", str(tmp_path / "data.csv"),
-        "--folds-path", str(tmp_path / "folds.csv"),
-        "--model-name", "chemprop",
-        "--model-id", "chemprop_test",
-        "--output-dir", str(tmp_path / "output"),
-        "--chemprop-config", config_text,
-        "--group-column", "group_id",
-        "--validation-fraction", "0.1",
-        "--validation-seed", "42",
-    ])
-    
-    with pytest.raises(SystemExit) as exc:
-        oof.main()
-
-    assert exc.value.code == 2
-    assert expected_error in capsys.readouterr().err
-    assert calls == []  
-
-@pytest.mark.parametrize(
-    "missing_flag",
-    [
-        "--chemprop-config",
-        "--group-column",
-        "--validation-fraction",
-        "--validation-seed",
-    ],
-)
-def test_cli_requires_chemprop_flags(
-    monkeypatch: pytest.MonkeyPatch, 
-    capsys,
-    tmp_path,
-    missing_flag
-):
-    calls = []
-    
-    def fake_run_oof(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(oof, "run_oof", fake_run_oof)
-
-    config = {
-        "epochs": 2, 
-        "seed": 42, 
-        "from_foundation": None, 
-        "target_columns": list(oof._SCORED_DEFAULT),
-    }
-
-    argv = [
-        "generate-oof",
-        "--data-path", str(tmp_path / "data.csv"),
-        "--folds-path", str(tmp_path / "folds.csv"),
-        "--model-name", "chemprop",
-        "--model-id", "chemprop_test",
-        "--output-dir", str(tmp_path / "output"),
-        "--chemprop-config", json.dumps(config),
-        "--group-column", "group_id",
-        "--validation-fraction", "0.1",
-        "--validation-seed", "42",
-    ]
-
-    index = argv.index(missing_flag)
-    del argv[index:index + 2]
-    monkeypatch.setattr(sys, "argv", argv)
-    
-    with pytest.raises(SystemExit) as exc:
-        oof.main()
-
-    assert exc.value.code == 2
-    assert f"{missing_flag} is required for Chemprop" in capsys.readouterr().err
     assert calls == []
 
 
@@ -2298,7 +2161,7 @@ def test_cli_requires_feature_model_flags(
     monkeypatch.setattr(oof, "run_oof", fake_run_oof)
 
     argv = [
-        "generate-oof",
+        "python -m models.oof",
         "--data-path", str(tmp_path / "data.csv"),
         "--folds-path", str(tmp_path / "folds.csv"),
         "--model-name", "decision_tree",
@@ -2317,335 +2180,9 @@ def test_cli_requires_feature_model_flags(
         oof.main()
 
     assert exc.value.code == 2
-    assert f"{missing_flag} is required for feature-based models" in capsys.readouterr().err
+    assert f"{missing_flag} is required" in capsys.readouterr().err
     assert calls == []
 
-
-@pytest.fixture
-def chemprop_conversion_tables() -> tuple[pl.DataFrame, pl.DataFrame]:
-    wide_predictions = pl.DataFrame({
-        "inchikey_full": ["A", "B"],
-        "CYP1A2_pIC50_direct_inhibition": [5.1, 6.2],
-        "CYP2C9_pIC50_direct_inhibition": [4.3, 5.4],
-        "CYP2D6_pIC50_direct_inhibition": [6.5, 7.6],
-        "CYP3A4_pIC50_direct_inhibition": [3.7, 4.8],
-    })
-
-    target_truth_values = {
-            "CYP1A2_pIC50_direct_inhibition": [0.2, 0.8, 0.0, 1.0],
-            "CYP2C9_pIC50_direct_inhibition": [0.4, 0.6, 0.0, 1.0],
-            "CYP2D6_pIC50_direct_inhibition": [0.6, 0.4, 0.0, 1.0],
-            "CYP3A4_pIC50_direct_inhibition": [0.8, 0.2, 0.0, 1.0],
-        }
-
-    molecules = [
-        ("A", 0),
-        ("B", 0),
-        ("C", 1),
-        ("D", 1),
-    ]
-    
-    truth_rows = []
-
-    for target, values in target_truth_values.items():
-        for (molecule, fold), value in zip(molecules, values, strict=True):
-            truth_rows.append({
-                "inchikey_full": molecule, 
-                "fold": fold, 
-                "target": target, 
-                "truth": value,
-            })
-
-    truth = pl.DataFrame(truth_rows)
-
-    return wide_predictions, truth
-
-
-def test_convert_chemprop_predictions_valid_input(
-    chemprop_conversion_tables,
-) -> None:
-
-    wide_predictions, truth = chemprop_conversion_tables
-
-    result = _convert_chemprop_predictions(
-        predictions = wide_predictions, 
-        truth=truth,
-        model_id="chemprop_test",
-        heldout_fold=0,
-    )
-
-    assert result.height == 8 # Two molecules x four targets
-    assert result["model_id"].unique().to_list() == ["chemprop_test"]
-    assert result["fold"].unique().to_list() == [0]
-
-    expected_predictions = pl.DataFrame(
-        [
-            ("chemprop_test", "A", 0, "CYP1A2_pIC50_direct_inhibition", 5.1),
-            ("chemprop_test", "B", 0, "CYP1A2_pIC50_direct_inhibition", 6.2),
-            ("chemprop_test", "A", 0, "CYP2C9_pIC50_direct_inhibition", 4.3),
-            ("chemprop_test", "B", 0, "CYP2C9_pIC50_direct_inhibition", 5.4),
-            ("chemprop_test", "A", 0, "CYP2D6_pIC50_direct_inhibition", 6.5),
-            ("chemprop_test", "B", 0, "CYP2D6_pIC50_direct_inhibition", 7.6),
-            ("chemprop_test", "A", 0, "CYP3A4_pIC50_direct_inhibition", 3.7),
-            ("chemprop_test", "B", 0, "CYP3A4_pIC50_direct_inhibition", 4.8),
-        ],
-        schema=["model_id", "inchikey_full", "fold", "target", "pred"],
-        orient="row"
-    )
-
-    keys = ["model_id", "inchikey_full", "fold", "target"]
-    assert_frame_equal(
-        result.sort(keys),
-        expected_predictions.sort(keys),
-    )
-
-
-def test_convert_chemprop_predictions_handles_shuffled_rows(
-    chemprop_conversion_tables
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-
-    shuffled_predictions = wide_predictions.reverse()
-    shuffled_truth = truth.reverse()
-
-    result = _convert_chemprop_predictions(
-        predictions = shuffled_predictions, 
-        truth=shuffled_truth,
-        model_id="chemprop_test",
-        heldout_fold=0,
-    )
-
-    assert result.height == 8 # Two molecules x four targets
-    assert result["model_id"].unique().to_list() == ["chemprop_test"]
-    assert result["fold"].unique().to_list() == [0]
-
-    expected_predictions = pl.DataFrame(
-        [
-            ("chemprop_test", "A", 0, "CYP1A2_pIC50_direct_inhibition", 5.1),
-            ("chemprop_test", "B", 0, "CYP1A2_pIC50_direct_inhibition", 6.2),
-            ("chemprop_test", "A", 0, "CYP2C9_pIC50_direct_inhibition", 4.3),
-            ("chemprop_test", "B", 0, "CYP2C9_pIC50_direct_inhibition", 5.4),
-            ("chemprop_test", "A", 0, "CYP2D6_pIC50_direct_inhibition", 6.5),
-            ("chemprop_test", "B", 0, "CYP2D6_pIC50_direct_inhibition", 7.6),
-            ("chemprop_test", "A", 0, "CYP3A4_pIC50_direct_inhibition", 3.7),
-            ("chemprop_test", "B", 0, "CYP3A4_pIC50_direct_inhibition", 4.8),
-        ],
-        schema=["model_id", "inchikey_full", "fold", "target", "pred"],
-        orient="row"
-    )
-
-    keys = ["model_id", "inchikey_full", "fold", "target"]
-    assert_frame_equal(
-        result.sort(keys),
-        expected_predictions.sort(keys),
-    )
-
-
-def test_convert_chemprop_predictions_omits_missing_truth_labels(
-    chemprop_conversion_tables
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-    target = "CYP2C9_pIC50_direct_inhibition"
-
-    # Baseline: all eight molecule/target predictions are required.
-    complete = _convert_chemprop_predictions(
-        predictions=wide_predictions,
-        truth=truth,
-        model_id="chemprop_test",
-        heldout_fold=0,
-    )
-
-    omitted_key = (
-        (pl.col("inchikey_full") == "A")
-        & (pl.col("fold") == 0)
-        & (pl.col("target") == target)
-    )
-    sparse_truth = truth.filter(~omitted_key)
-
-    result = _convert_chemprop_predictions(
-        predictions=wide_predictions,
-        truth=sparse_truth,
-        model_id="chemprop_test",
-        heldout_fold=0,
-    )
-
-    assert result.height == 7
-    assert result.filter(omitted_key).is_empty()
-
-    keys = ["model_id", "inchikey_full", "fold", "target"]
-    assert_frame_equal(
-        result.sort(keys),
-        complete.filter(~omitted_key).sort(keys),
-    )
-
-
-def test_convert_chemprop_predictions_ignores_auxiliary_columns(
-    chemprop_conversion_tables
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-    
-    wide_predictions = wide_predictions.with_columns(pl.lit(0).alias("auxiliary"))
-
-    result = _convert_chemprop_predictions(
-        predictions = wide_predictions, 
-        truth=truth,
-        model_id="chemprop_test",
-        heldout_fold=0,
-    )
-
-    assert result.height == 8 # Two molecules x four targets
-    assert result["model_id"].unique().to_list() == ["chemprop_test"]
-    assert result["fold"].unique().to_list() == [0]
-
-    expected_predictions = pl.DataFrame(
-        [
-            ("chemprop_test", "A", 0, "CYP1A2_pIC50_direct_inhibition", 5.1),
-            ("chemprop_test", "B", 0, "CYP1A2_pIC50_direct_inhibition", 6.2),
-            ("chemprop_test", "A", 0, "CYP2C9_pIC50_direct_inhibition", 4.3),
-            ("chemprop_test", "B", 0, "CYP2C9_pIC50_direct_inhibition", 5.4),
-            ("chemprop_test", "A", 0, "CYP2D6_pIC50_direct_inhibition", 6.5),
-            ("chemprop_test", "B", 0, "CYP2D6_pIC50_direct_inhibition", 7.6),
-            ("chemprop_test", "A", 0, "CYP3A4_pIC50_direct_inhibition", 3.7),
-            ("chemprop_test", "B", 0, "CYP3A4_pIC50_direct_inhibition", 4.8),
-        ],
-        schema=["model_id", "inchikey_full", "fold", "target", "pred"],
-        orient="row"
-    )
-
-    keys = ["model_id", "inchikey_full", "fold", "target"]
-    assert_frame_equal(
-        result.sort(keys),
-        expected_predictions.sort(keys),
-    )
-
-
-def test_convert_chemprop_predictions_rejects_duplicate_ids(
-    chemprop_conversion_tables
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-
-    duplicated = pl.concat([wide_predictions, wide_predictions.head(1)])
-
-    with pytest.raises(ValueError, match="duplicate molecules IDs"):
-        _convert_chemprop_predictions(
-            predictions = duplicated, 
-            truth=truth,
-            model_id="chemprop_test",
-            heldout_fold=0,
-        )
-
-
-def test_convert_chemprop_predictions_rejects_missing_molecules(
-    chemprop_conversion_tables
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-
-    incomplete = wide_predictions.slice(1)
-    
-    with pytest.raises(ValueError, match="Missing molecules"):
-        _convert_chemprop_predictions(
-                predictions = incomplete, 
-                truth=truth,
-                model_id="chemprop_test",
-                heldout_fold=0,
-            )
-
-
-def test_convert_chemprop_predictions_rejects_extra_molecules(
-    chemprop_conversion_tables
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-    
-    extra_row = wide_predictions.head(1).with_columns(
-        pl.lit("SYNTHETIC_EXTRA").alias("inchikey_full")
-    )
-    extended = pl.concat([wide_predictions, extra_row])
-
-    with pytest.raises(ValueError, match="Unexpected molecules"):
-        _convert_chemprop_predictions(
-            predictions = extended, 
-            truth=truth,
-            model_id="chemprop_test",
-            heldout_fold=0,
-        )
-
-@pytest.mark.parametrize(
-    "missing_column",
-    [
-        "inchikey_full",
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ],
-)
-def test_convert_chemprop_predictions_rejects_missing_columns(
-    chemprop_conversion_tables,
-    missing_column: str,
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-    incomplete = wide_predictions.drop(missing_column)
-
-    with pytest.raises(ValueError, match="Missing prediction columns") as exc:
-        _convert_chemprop_predictions(
-            predictions = incomplete, 
-            truth=truth,
-            model_id="chemprop_test",
-            heldout_fold=0,
-        )
-
-    assert missing_column in str(exc.value)
-
-@pytest.mark.parametrize(
-    "values, message",
-    [
-        pytest.param(
-            ["invalid", "6.2"],
-            "must be numeric",
-            id="nonnumeric",
-        ),
-        pytest.param(
-            [None, 6.2],
-            "null values in predictions",
-            id="null",
-        ),
-        pytest.param(
-            [float("nan"), 6.2],
-            "pred contains non-finite values",
-            id="nan",
-        ),
-        pytest.param(
-            [float("inf"), 6.2],
-            "pred contains non-finite values",
-            id="positive-infinity",
-        ),
-        pytest.param(
-            [float("-inf"), 6.2],
-            "pred contains non-finite values",
-            id="negative-infinity",
-        ),
-    ],
-)
-def test_convert_chemprop_predictions_rejects_invalid_prediction_values(
-    chemprop_conversion_tables,
-    values,
-    message: str,
-) -> None:
-    wide_predictions, truth = chemprop_conversion_tables
-    target = "CYP1A2_pIC50_direct_inhibition"
-
-    invalid = wide_predictions.with_columns(
-        pl.Series(target, values)
-    )
-
-    with pytest.raises(ValueError, match=message):
-        _convert_chemprop_predictions(
-            predictions=invalid,
-            truth=truth,
-            model_id="chemprop_test",
-            heldout_fold=0,
-        )
-    
 
 @pytest.mark.parametrize(
     "model_name, config_arg, seed_key, config",
@@ -2655,12 +2192,6 @@ def test_convert_chemprop_predictions_rejects_invalid_prediction_values(
             "model_params",
             "random_state",
             {"max_depth": 5, "random_state": 42},
-        ),
-        (
-            "chemprop",
-            "chemprop_config",
-            "seed",
-            {"epochs": 2, "seed": 42},
         ),
     ],
 )
@@ -2693,7 +2224,6 @@ def test_run_oof_seeds_calls_and_outputs(
         input_names=["rdkit"],
         output_dir=tmp_path / "output",
         cache_dir=tmp_path / "features",
-        validation_seed=42,
         seeds=[0, 1, 2],
         **{config_arg: config},
     )
@@ -2712,7 +2242,6 @@ def test_run_oof_seeds_calls_and_outputs(
         assert call["data_path"] == tmp_path / "data.csv"
         assert call["folds_path"] == tmp_path / "folds.csv"
         assert call["model_name"] == model_name
-        assert call["validation_seed"] == 42
         assert call["input_names"] == ["rdkit"]
         assert call["cache_dir"] == tmp_path / "features"
         assert predictions_by_seed[seed].equals(returned_predictions[seed])
@@ -2744,8 +2273,7 @@ def test_run_oof_seeds_rejects_invalid_seeds(
             input_names=["rdkit"],
             output_dir=tmp_path / "output",
             cache_dir=tmp_path / "features",
-            validation_seed=42,
-            seeds=seeds,
+                seeds=seeds,
         )
 
 @pytest.mark.parametrize(
@@ -2753,9 +2281,6 @@ def test_run_oof_seeds_rejects_invalid_seeds(
     [
         ("decision_tree", "model_params", [], "model_params must be dict"),
         ("decision_tree", "model_params", "bad", "model_params must be dict"),
-        ("chemprop", "chemprop_config", None, "chemprop_config must be dict"),
-        ("chemprop", "chemprop_config", [], "chemprop_config must be dict"),
-        ("chemprop", "chemprop_config", "bad", "chemprop_config must be dict"),
     ],
 )
 def test_run_oof_seeds_rejects_invalid_config(
@@ -2775,8 +2300,7 @@ def test_run_oof_seeds_rejects_invalid_config(
             input_names=["rdkit"],
             output_dir=tmp_path / "output",
             cache_dir=tmp_path / "features",
-            validation_seed=42,
-            seeds=[0, 1, 2],
+                seeds=[0, 1, 2],
             **{config_arg: config},
         )
 
@@ -2804,8 +2328,7 @@ def test_run_oof_seeds_rejects_changed_truth(tmp_path, monkeypatch):
             input_names=["rdkit"],
             output_dir=tmp_path / "output",
             cache_dir=tmp_path / "features",
-            validation_seed=42,
-            seeds=[0, 1, 2],
+                seeds=[0, 1, 2],
         )
 
     assert len(calls) == 2

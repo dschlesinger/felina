@@ -2,17 +2,11 @@
 
 Code for the OpenADMET CYP Inhibition Blind Challenge.
 
-**Contributing:** read [RULES.md](RULES.md) before opening a PR — how a PR should
-look, what must never be committed, the rule that only Denali submits to the live
-HuggingFace challenge, and how to use AI tools. Pick a workstream from
-[tasks/round1/MANIFEST.md](tasks/round1/MANIFEST.md), which also holds the shared metric, the
-pinned split and the join keys.
-
 ## Setup
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pip install -e .   # installs requirements.txt and registers the CLI entry points (data, train-model, evaluate-models, ...)
 ```
 
 ## Data
@@ -27,42 +21,16 @@ download-data              # same as `data fetch all`
 
 Datasets are recipes in `src/data_tools/datasets.py`: a `fetch` step from the source and an optional `derive` step.
 `pubchem_aid1851` yields per-isoform auxiliary heads; `p450_family` (ChEMBL + BindingDB, Pfam PF00067) yields one
-`{gene}_pIC50_{source}` head per protein per source.
-
-### External data as auxiliary heads
-
-External CYP measurements are **never pooled into the scored pIC50 columns**.
-Each source x isoform x readout becomes its own column, and therefore its own
-head at training time, so no cross-assay calibration is required: a shared
-D-MPNN encoder sees every molecule and every label while each head keeps its
-own scale. Chemprop masks missing targets in the loss, so the sparse block
-structure of a multi-source union costs nothing.
-
-This replaces a pretrain-then-finetune split. One model is trained jointly on
-all heads at once, which avoids both the pooling problem and catastrophic
-forgetting during fine-tuning.
-
-**PubChem AID 1851** contributes the signal a potency-only ingest throws away.
-The panel screens five isoforms (1A2, 2C9, 2C19, 2D6, 3A4) in 15-point
-dose-response. Of its 85,715 compound x isoform rows only 40,684 have a fitted
-`Potency`, but **all** of them have `Max_Response` — including the 42,460 rows
-the screen called Inactive, which have no potency at all. Since ChEMBL-style
-potency data is truncated from below (no curve, no row), those negatives are
-what a model trained on fitted pIC50 never sees. CYP2C19 is carried as an
-extra head even though the challenge does not score it.
-
-`Max_Response` is a PERCENT change in luminescence and is mostly negative,
-because inhibiting pro-luciferin conversion *decreases* signal. It is emitted
-negated, as `{ISO}_pctinhib_aid1851`, so that larger means more inhibition —
-matching the direction of pIC50.
+`{gene}_{readout}_{source}` head per protein per source (IC50 only by default, so `{gene}_pIC50_{source}`).
 
 ### Structural identity
 
 Sources spell the same molecule differently (salt vs free base, explicit vs
-implicit stereo), so raw SMILES comparison under-reports overlap. Every merge
-and every overlap measurement keys on the **InChIKey connectivity block**
+implicit stereo), so raw SMILES comparison under-reports overlap. External sources are
+joined, and every overlap measurement keyed, on the **InChIKey connectivity block**
 (first 14 characters), which is invariant to stereochemistry, protonation and
-isotope labelling. See `data_tools.standardize`.
+isotope labelling. The in-house sources (same molecules) are collapsed on the full
+InChIKey so stereoisomers stay distinct. See `data_tools.standardize`.
 
 ## Training
 
@@ -100,11 +68,11 @@ train-model --model chemprop --pretrain tdc_hlm --finetune challenge pubchem:CYP
 challenge labels alone, `--datasets challenge pubchem` is both, and `--datasets pubchem`
 is the auxiliary data alone. The challenge data is still loaded in every case,
 since it provides the pinned train/val split and the validation molecules; with
-no `challenge` in the config its labels are just not trained on, and each challenge head
-is scored with the same-isoform auxiliary head, so that RMSE carries a
+no `challenge` in the config its labels are just not trained on. For `unimol`, each
+challenge head is then scored with the same-isoform auxiliary head, so that RMSE carries a
 cross-assay calibration offset. Each head keeps its own scale and missing labels
 are masked in the loss. With several runs, outputs go to
-`<output-dir>/<config>/seed<N>` (default `results/<model>/...`). Shared flags:
+`<output-dir>/<config>/seed<N>` (default `results/chemprop/`, `results/chemprop/chemeleon/` or `results/unimol/`). Shared flags:
 `--target-columns`, `--split-strategy`, `--split-seed`, `--epochs`, `--seed`,
 `--output-dir`.
 
@@ -122,7 +90,7 @@ Chemprop training options (`src/models/chemprop_ext.py` patches them into
 | `--mpn-dropout P`, `--ffn-dropout P` | Dropout in message passing / the prediction head separately |
 | `--hidden-dims`, `--depths`, `--mpn-dropouts` | Encoder-size sweep: every combination trains, times seeds. Later stages inherit the first stage's encoder size |
 
-Checkpoints trained with Huber need `models.chemprop_ext` importable to load.
+Checkpoints trained with Huber need `models.chemprop_losses` importable to load.
 Censored losses (`--loss-function bounded-mse`) need `<`/`>` in the label CSV;
 none of our datasets carry that yet.
 
@@ -130,26 +98,36 @@ none of our datasets carry that yet.
 is reported against. `blind_matched` instead makes the held-out slices imitate the
 blind set's regime — 75% novel scaffolds rather than 100% — which scores about
 0.013 lower and is **not** comparable to the pinned numbers. It is a diagnostic for
-how much the pinned split understates performance, not a reporting axis; it ranks
-models identically. See [reports/blind_matched_split.md](reports/blind_matched_split.md).
+how much the pinned split understates performance, not a reporting axis. In the
+three-model comparison that produced the 0.013 figure (average shift -0.0134, range
+-0.0095 to -0.0204) the model ranking did not change.
 
 Chemprop-based models pass unknown flags (`--batch-size`, `--accelerator`,
-`--task-weights`, ...) through to `chemprop train`. To train on a ready table
-instead, `--data-path data/union_train.csv --target-columns <all heads>`.
-`train-chemprop` and `train-unimol` remain as aliases for the matching
-`--model`. On SCC, `scripts/train_model.qsub` forwards its arguments to
-`train-model`. To add a model, write a `Backend` in
-`src/models/training/` and register it in `BACKENDS`.
+`--task-weights`, ...) through to `chemprop train`. `--input NAME [NAME ...]` adds
+any registered representation (see Representations) as extra molecule features for
+every stage: it is computed per molecule, cached in `data/features/`, and passed to
+chemprop as `--descriptors-path` (non-finite values become 0 with a warning; chemprop
+scales them by default, `--no-descriptor-scaling` turns that off). To train on a ready table
+instead, `--data-path <table.csv> --target-columns <heads>`.
+`train-unimol` remains as an alias for `--model unimol`. On SCC,
+`scripts/train_model.qsub` forwards its arguments to `train-model`. To add a
+model, write a `Backend` in `src/models/training/` and register it in `BACKENDS`.
+
+### Other commands
+
+Every command takes `--help`.
 
 ```bash
-head-search                # search auxiliary-head subsets on the pinned split (single / greedy / ablation / exhaustive)
-evaluate-models            # train/val metrics for the sklearn-style models
-generate-results           # predictions for submission
+evaluate-models      # train/val metrics for the sklearn-style models; see Representations and Ensembling
+plot-results         # redraw the evaluate-models plots from a saved --predictions-out CSV
+foundation-model     # list/alias trained chemprop and unimol runs and generate their feature caches (--list, --paths, --generate-cache)
+motif-report         # generate reports/pharmacophore_features.md from the pharmacophore motif table
 ```
+
 
 ## Representations
 
-`evaluate-models` and `generate-results` take `--input` with one or more of the
+`evaluate-models` takes `--input` with one or more of the
 names below; several names are hstacked into one feature matrix.
 
 | `--input` | Class | Dim | What it is |
@@ -163,6 +141,12 @@ names below; several names are hstacked into one feature matrix.
 | `xtb_solv_v1` | `XTBSolvation` | 9 | GFN2-xTB (`tblite`) ALPB water/octanol solvation, xTB logP, heuristic logD at pH 7.4; slow, see note below |
 | `xtb_elec_v1` | `XTBElectronic` | 24 | Boltzmann-averaged GFN2-xTB FMO energies, charges, SASA, shape, flexibility; shares conformers with `xtb_solv_v1` |
 | `cyp_mech_v1` | `CYPMechanisticBlock` | 30 | Mechanistic block: N/acid group counts, rule-based pKa and pH 7.4 protonation state, basic-N-to-aryl topological distances, CYP2D6 pharmacophore flags. Ported from Lizard Wizard Gizzard, see Acknowledgements |
+| `shape` | `ShapeDescriptors` | 11 | Deterministic RDKit 3D shape descriptors |
+| `erg` | `ErGFingerprint` | 315 | RDKit extended reduced graph (ErG) pharmacophore fingerprint |
+| `unimol` | `UniMol` | 512 | Uni-Mol embedding (pretrained, or a fine-tuned model); needs `unimol_tools` |
+| `cyp_heme_v2` | `HemeCoordinationMotifs` | 13 | SMARTS counts for nitrogens able to ligate the heme iron, plus a steric-accessibility split |
+| `cyp_isoform_v2` | `IsoformPreferenceDescriptors` | 10 | Physicochemical descriptors chosen for the four scored isoforms, each cited |
+| `cyp_tdi_v2` | `MechanismBasedAlerts` | 6 | Structural alerts for time-dependent inactivation |
 
 The xTB blocks embed up to 10 ETKDG/MMFF conformers per molecule and run three
 xTB single points each. Cost is seconds per molecule, so the first run is the
@@ -178,7 +162,11 @@ evaluate-models --models ridge --input morgan --predictions-out results/validati
 ```
 
 `--predictions-out <path>` optionally saves one UTF-8 long-format CSV containing
-validation predictions for every selected model, input set, and target:
+validation predictions for every selected model, input set, and target (when blind-set
+predictions are computed, via `--predict-blind` or `--plots train-test`, it also writes a
+sibling `<stem>.blind.csv`, `molecule,isoform,model,input,split,seed,y_pred`, which
+`plot-results` reads; `--predict-blind` separately writes one
+`results/<model>_<input>_blind_predictions.csv` per model and input):
 
 ```text
 smiles,isoform,model,input,split,seed,y_true,y_pred
@@ -188,14 +176,16 @@ smiles,isoform,model,input,split,seed,y_true,y_pred
 column name and `model` is its registry name. Combined inputs use their ordered
 names joined with ` + ` (for example, `count_morgan + rdkit`); `--input all`
 produces separate groups. `split` records the executed strategy (`random`,
-`scaffold`, or `butina`), and `seed` is the **split seed only**. This evaluator
-does not use the pinned split column or pass that seed to model constructors;
-models retain their own defaults. Record the command alongside exports, including
+`scaffold`, `butina`, or `blind_matched`), and `seed` is the **split seed only**. This evaluator
+does not use the pinned split column. With `--nseeds 1` models keep their own
+default seeds; with `--nseeds N` they are seeded `--seed` to `--seed + N - 1`, but
+the CSV still records only `--seed`. Record the command alongside exports, including
 `--val-split`, `--butina-cutoff`, and the data source, which are not CSV columns.
 
 Each model predicts validation once, and those exact values are scored and
-exported. The shared filter `np.isfinite(X).all(axis=1) & np.isfinite(y)` selects
-features, labels, and SMILES together, retaining their order. Every surviving
+exported. Non-finite feature values are first set to 0 (with a warning on stderr), then
+`drop_nan_rows` drops rows with a non-finite label, selecting features, labels,
+and SMILES together and retaining their order. Every surviving
 row is saved, even if another representation drops that molecule. Duplicate
 source SMILES within a `(model, input, isoform, split, seed)` group cause export
 to fail with an explicit error before writing; rows are never deduplicated.
@@ -239,12 +229,11 @@ means test is still a different distribution. Features are
 standardized with train statistics first, and the pairwise metrics subsample to
 `--max-samples` molecules.
 
-Unparsable SMILES give an all-NaN row, which `evaluate-models` drops. Features
+Unparsable SMILES give an all-NaN row; `evaluate-models` zeroes non-finite feature values (a molecule is then dropped only for a missing label), while `representations --evaluate` drops non-finite rows. Features
 are cached per representation in `data/features/{name}.npy`, keyed on SMILES, so
 each molecule is featurized once across every split and seed. To add one,
 subclass `Representation` in `src/representations/` and append it to
-`INPUT_REGISTRY` in `src/data_tools/inputs.py`; see
-`reports/t2_solo_representations.md` for how the current six compare.
+`INPUT_REGISTRY` in `src/data_tools/inputs.py`.
 
 ## Models
 
@@ -262,12 +251,11 @@ scaling or PCA. Select models with `evaluate-models --models <name> ...`.
 | `xgboost` | XGBoost XGBRegressor | 200 trees, rate=0.05, depth=6, hist trees |
 | `tabpfn` | TabPFN TabPFNRegressor | n_estimators=auto, temperature=auto, device=auto, seed=42 |
 
-The three ensemble wrappers default to CPU, `random_state=42` and `n_jobs=1`.
+The three ensemble wrappers default to `random_state=42` and `n_jobs=1`. Random Forest runs on CPU; LightGBM and XGBoost default to `device="auto"` (CUDA when a GPU is visible, else CPU).
 Random Forest uses `criterion=squared_error`, `bootstrap=True` and `max_features=1.0`.
-LightGBM uses `boosting_type=gbdt`, `objective=regression`, `device_type=cpu`
-and `verbosity=-1`. Its unlimited depth is `max_depth=-1`.
+LightGBM uses `boosting_type=gbdt`, `objective=regression`, `verbosity=-1`. Its unlimited depth is `max_depth=-1`.
 XGBoost uses `objective=reg:squarederror`, `booster=gbtree`, `tree_method=hist`,
-`device=cpu`, `subsample=1.0` and `colsample_bytree=1.0`.
+`subsample=1.0` and `colsample_bytree=1.0`.
 
 Constructors expose tree count, complexity controls, seed and worker count;
 the boosting wrappers also expose learning rate. The evaluator uses constructor
@@ -276,23 +264,21 @@ defaults. These are baseline settings, not tuned CYP results.
 TabPFN does no gradient training: `fit` stores the training rows and the
 transformer conditions on them at predict time. Its constructor exposes
 `n_estimators`, `softmax_temperature`, `ignore_pretraining_limits`, `device`,
-`model_path` and `random_state`; it defaults to `device="auto"` rather than CPU,
-since the others are tree models and this one is a transformer. Set
+`model_path`, `random_state` and `n_components`; it defaults to `device="auto"` rather than CPU,
+since the others are tree models and this one is a transformer. By default
+it first reduces the features to `n_components=256` with a PCA step (`None` disables it). Set
 `ignore_pretraining_limits=True` to feed it representations wider than the
 pretraining feature limit.
 
-`tabpfn` is an optional dependency, registered only when the package is
-installed, so a missing install drops it from `--models all` instead of
-breaking the CLI. It is untuned and has not been run on CYP data yet.
+`tabpfn` is always registered. Its constructor defers `import tabpfn`, so listing it
+costs nothing, but the package must be installed to construct it. It runs with its defaults, untuned.
 
 ## Splits
 
-`data_tools.load.load_data` supports `random`, `scaffold` (Bemis-Murcko) and
-`butina` (Tanimoto cluster) train/val splits; `evaluate-models` exposes them as
-`--split` and `--seed`.
-
-Chemprop multi-task runs use a different mechanism: a pinned `split` column in
-`data/union_train.csv`, and `head-search` refuses to run without it.
+`data_tools.load.load_data` supports `random`, `scaffold` (Bemis-Murcko),
+`butina` (Tanimoto cluster) and `blind_matched` train/val splits; `evaluate-models`
+exposes them as `--split` and `--seed`. `blind_matched` makes the validation slice
+imitate `data/test.csv` (see Training) and needs that file present.
 
 ## Ensembling
 
@@ -331,9 +317,8 @@ Stackers are fitted only on out-of-fold predictions, never on predictions the ba
 models saw in training. Validation informs selection, so validation metrics are
 development results.
 
-Chemprop can train jointly on additional auxiliary regression columns listed
-in `chemprop_config.target_columns`. Feature models do not automatically use
-auxiliary target columns, but can use auxiliary-trained checkpoint embeddings.
+Feature models do not use auxiliary target columns, but can use embeddings from
+auxiliary-trained checkpoints (`chemprop[...]`, `unimol[...]` inputs).
 Checkpoints must not have been trained on held-out labels. Record their resolved
 paths and hashes, keep weights immutable, and use fresh caches when changing them.
 

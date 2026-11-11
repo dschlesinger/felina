@@ -1,11 +1,11 @@
-"""Write a fixed train/val/test split column into a multi-task table.
+"""Compute a fixed train/val/test split column for a multi-task table.
 
-Why a *pinned* split matters for head-subset experiments: if every training
-run re-splits at random, the run-to-run difference caused by the split is
-comparable to (or larger than) the effect of adding an auxiliary head. Any
-comparison between head subsets is then measuring split noise. Pinning one
-split column and reusing it across every configuration removes that term
-entirely, so a difference between subsets is attributable to the heads.
+Why a *fixed* split matters when comparing dataset or head selections: if every
+training run re-splits at random, the run-to-run difference caused by the split
+is comparable to (or larger than) the effect of adding an auxiliary head. The
+split is a deterministic function of the in-house molecules, so it is identical
+whichever `--datasets` are chosen and a difference between selections is
+attributable to the heads.
 
 Two rules shape the split:
 

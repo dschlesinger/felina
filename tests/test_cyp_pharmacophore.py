@@ -26,7 +26,7 @@ def test_every_motif_smarts_compiles():
     assert bad == []
 
 
-def test_every_motif_rollup_is_a_t6_donor_label():
+def test_every_heme_motif_rollup_is_a_known_donor_label():
     allowed = {"imidazole", "triazole", "pyridine", "aliphatic amine"}
     for m in _MOTIFS:
         if m.block == "heme" and m.rollup:
@@ -41,7 +41,7 @@ def test_feature_names_match_matrix_width():
 # --- the Podgorski pair: the sharpest available test of the hindrance term ---
 # 4-(pyridin-3-yl)benzoic acid coordinates heme iron; 4-(pyridin-2-yl)benzoic
 # acid does not (an aqua ligand remains). Crystallographically resolved.
-# Podgorski et al. 2020, Biochemistry — spec section 12.1.
+# Podgorski et al. 2020, Biochemistry.
 def test_podgorski_pair_separates_on_hindrance():
     coordinates = _row(HEME, "OC(=O)c1ccc(cc1)-c1cccnc1")   # pyridin-3-yl
     does_not = _row(HEME, "OC(=O)c1ccc(cc1)-c1ccccn1")      # pyridin-2-yl
@@ -88,9 +88,9 @@ def test_primary_aliphatic_amine_counted_but_not_amide_or_aniline():
     assert _row(HEME, "Nc1ccccc1")["heme_amine_primary"] == 0.0        # aniline
 
 
-# --- Review Focus items ---
+# --- no-match, empty-SMILES and dtype edge cases ---
 def test_no_match_molecule_gives_zeros_not_nan():
-    """Critical: NaN here would make drop_nan_rows delete every non-azole molecule."""
+    """NaN here would make drop_nan_rows delete every non-azole molecule."""
     arr = HEME.transform(pl.Series(["c1ccccc1"]))
     assert not np.isnan(arr).any()
     assert (arr == 0).all()
@@ -337,7 +337,7 @@ def test_table_content_hash_pins_the_version():
     src/representations/cyp_pharmacophore.py, then update the expected hash below with
     the value this failure prints. Do not update the hash without bumping the version —
     the feature cache is keyed on the registered name, so a silent table change serves
-    stale columns (see the spec, section 5.1).
+    stale columns.
     """
     import hashlib
 

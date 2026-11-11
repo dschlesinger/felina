@@ -1,4 +1,4 @@
-"""Synthetic contract checks for real T3 tree estimators, not CYP accuracy tests."""
+"""Synthetic contract checks for real tree estimators, not CYP accuracy tests."""
 
 import numpy as np
 import pytest
@@ -46,8 +46,8 @@ def test_real_estimator_fit_predict(name, configured):
     np.testing.assert_allclose(reordered, batch[permutation], rtol=1e-6, atol=1e-8)
 
 
-def test_registry_preserves_existing_order_and_appends_ensembles():
-    assert list(REGISTRY) == ["decision_tree", "ridge", "random_forest", "lightgbm", "xgboost"]
+def test_registry_order_and_tree_model_names():
+    assert list(REGISTRY) == ["decision_tree", "ridge", "random_forest", "lightgbm", "xgboost", "tabpfn"]
     for name in ["random_forest", "lightgbm", "xgboost"]:
         assert REGISTRY[name].name == name
         assert issubclass(REGISTRY[name], CYPModel)

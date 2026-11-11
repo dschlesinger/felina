@@ -1,8 +1,8 @@
-"""Structure generation: co-folding and docking (T5).
+"""Structure generation: co-folding and docking.
 
 Local smoke-test harness for protein-ligand co-folding. Production engines
 (IntelliFold-2, Protenix) run on the SCC; this package lets us validate the
-input contract, the output schema, and T6's heme-coordination metrics on a
+input contract, the output schema, and the heme-coordination metrics on a
 single known complex (ketoconazole x CYP3A4) using whatever engine runs on
 the local GPU.
 

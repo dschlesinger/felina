@@ -134,8 +134,6 @@ def test_runner_saves_complete_run(tmp_path, monkeypatch, method, saved_folds):
     def fake_seeds(population, kwargs):
         calls.append((population, kwargs["model_id"]))
         assert kwargs["seeds"] == [11, 22, 33]
-        assert kwargs["group_column"] == "oof_group"
-        assert kwargs["validation_seed"] == 42
         if population == "oof":
             frame = runner._load_oof_data(kwargs["data_path"], kwargs["folds_path"])
             assert set(frame["split"]) == {"train"}
