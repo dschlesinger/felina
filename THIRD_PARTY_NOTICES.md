@@ -36,3 +36,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Atom-JEPA
+
+- Source: https://huggingface.co/atom-jepa/atom-jepa (code: https://github.com/khelverskovp/atom-jepa), license CC-BY-4.0
+- Used in: `src/representations/atom_jepa.py`
+- What was taken: the pretrained `molecules` and `bio` encoder weights, used as fixed feature extractors through the
+  `atom-jepa` package. Paper: "Atom-JEPA: Joint-Embedding Predictive Architecture for 3D Atomistic Systems" (arXiv 2610.08400).

@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 import polars as pl
 
+from representations.atom_jepa import AtomJEPA, AtomJEPABio
 from representations.chemeleon import CheMeleon
 from representations.chemprop_weights import ChempropWeights, cache_name, parse_spec
 from representations.rdkit_descriptors import RDKitDescriptors
@@ -34,6 +35,8 @@ _maccs = MACCS()
 _mordred = MordredDescriptors()
 _shape = ShapeDescriptors()
 _unimol = UniMol()
+_atom_jepa = AtomJEPA()
+_atom_jepa_bio = AtomJEPABio()
 _cyp_heme = HemeCoordinationMotifs()
 _cyp_isoform = IsoformPreferenceDescriptors()
 _cyp_tdi = MechanismBasedAlerts()
@@ -48,6 +51,14 @@ def _shape_features(df: pl.DataFrame) -> np.ndarray:
 
 def _unimol_features(df: pl.DataFrame) -> np.ndarray:
     return _unimol.transform(df["SMILES"])
+
+def _atom_jepa_features(df: pl.DataFrame) -> np.ndarray:
+    return _atom_jepa.transform(df["SMILES"])
+
+
+def _atom_jepa_bio_features(df: pl.DataFrame) -> np.ndarray:
+    return _atom_jepa_bio.transform(df["SMILES"])
+
 
 def _rdkit_features(df: pl.DataFrame) -> np.ndarray:
     return _rdkit.transform(df["SMILES"])
@@ -110,6 +121,8 @@ INPUT_REGISTRY: dict[str, Callable[[pl.DataFrame], np.ndarray]] = {
     _mordred.name: _mordred_features,
     _shape.name: _shape_features,
     _unimol.name: _unimol_features,
+    _atom_jepa.name: _atom_jepa_features,
+    _atom_jepa_bio.name: _atom_jepa_bio_features,
     # --- CYP pharmacophore blocks (append-only; versioned names pin the motif table) ---
     _cyp_heme.name: _cyp_heme_features,
     _cyp_isoform.name: _cyp_isoform_features,
