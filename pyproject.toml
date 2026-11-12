@@ -9,7 +9,7 @@ authors = [
 ]
 description = "Code for OpenADMET CYP Inhibition Blind Challenge"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.15"
 dynamic = ["version", "dependencies"]
 
 [project.scripts]
