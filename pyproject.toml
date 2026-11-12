@@ -16,7 +16,6 @@ dynamic = ["version", "dependencies"]
 download-data = "data_tools.data_cli:download_all"
 evaluate-models = "models.evaluate:main"
 plot-results = "models.plot_results:main"
-train-unimol = "models.train_unimol:main"
 train-model = "models.train_model:main"
 motif-report = "data_tools.motif_report:main"
 representations = "data_tools.representations_cli:main"

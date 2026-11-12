@@ -126,8 +126,7 @@ every stage: it is computed per molecule, cached in `data/features/`, and passed
 chemprop as `--descriptors-path` (non-finite values become 0 with a warning; chemprop
 scales them by default, `--no-descriptor-scaling` turns that off). To train on a ready table
 instead, `--data-path <table.csv> --target-columns <heads>`.
-`train-unimol` remains as an alias for `--model unimol`. On SCC,
-`scripts/train_model.qsub` forwards its arguments to `train-model`. To add a
+On SCC, `scripts/train_model.qsub` forwards its arguments to `train-model`. To add a
 model, write a `Backend` in `src/models/training/` and register it in `BACKENDS`.
 
 ### Other commands
