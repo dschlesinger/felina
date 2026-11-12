@@ -25,10 +25,16 @@ import copy
 import sys
 
 from data_tools.merge_datasets import describe
+from models.run_log import changed_flags, run_log
 from models.training import BACKENDS
 from models.training.common import add_common_arguments, slug
 
+_SWEPT = {"parser", "model", "seed", "seeds", "n_seeds", "datasets", "learning_rate"}  # set per run, not per command
 _CHALLENGE = "challenge"  # the scored heads: trained on only when listed, always loaded for the split
+
+
+def _as_list(value) -> list:
+    return [] if value is None else list(value) if isinstance(value, (list, tuple)) else [value]
 
 
 def main(argv: list[str] | None = None, model: str | None = None) -> None:
@@ -73,28 +79,37 @@ def main(argv: list[str] | None = None, model: str | None = None) -> None:
     runs = [(group, lr, variant, seed) for group in args.datasets or [None] for lr in lrs for variant in variants for seed in seeds]
     failed = []
     for index, (group, lr, variant, seed) in enumerate(runs, 1):
-        run = copy.copy(args)
-        run.seed = seed
-        if lr is not None:
-            run.learning_rate = lr
-        run.variant = variant
-        run.use_challenge = True
-        run.run_label = _CHALLENGE
+        flags = {"model": model, **changed_flags(args, parser, skip=_SWEPT)}
         if group is not None:
-            run.use_challenge = _CHALLENGE in group
-            run.datasets = [t for t in group if t != _CHALLENGE]
-            run.run_label = slug(group)
-        tag = "_".join(f"{k}{v}" for k, v in variant.items())
-        if tag:
-            run.run_label = f"{run.run_label}_{tag}"
-        if len(runs) > 1:
-            base = args.output_dir or backend.results_dir
-            run.output_dir = base / run.run_label / f"seed{seed}"
-        backend.validate(run, parser)
-        print(f"\n##### run {index}/{len(runs)}: {run.run_label}{f' lr {lr}' if lr is not None else ''}{f' {variant}' if variant else ''} seed {seed}", file=sys.stderr)
-        code = backend.run(run, extra)
-        if code != 0:
-            failed.append(f"{run.run_label} lr {lr} {variant} seed {seed}")
+            flags["datasets"] = slug(group)
+        if lr is not None and lr not in _as_list(parser.get_default("learning_rate")):
+            flags["learning-rate"] = lr
+        flags.update({k.replace("_", "-"): v for k, v in variant.items()})
+        if seed != parser.get_default("seed"):
+            flags["seed"] = seed
+        with run_log("train", flags, header={"sweep": f"{index}/{len(runs)}"}) as log:
+            run = copy.copy(args)
+            run.seed = seed
+            if lr is not None:
+                run.learning_rate = lr
+            run.variant = variant
+            run.use_challenge = True
+            run.run_label = _CHALLENGE
+            if group is not None:
+                run.use_challenge = _CHALLENGE in group
+                run.datasets = [t for t in group if t != _CHALLENGE]
+                run.run_label = slug(group)
+            tag = "_".join(f"{k}{v}" for k, v in variant.items())
+            if tag:
+                run.run_label = f"{run.run_label}_{tag}"
+            if len(runs) > 1:
+                base = args.output_dir or backend.results_dir
+                run.output_dir = base / run.run_label / f"seed{seed}"
+            backend.validate(run, parser)
+            print(f"\n##### run {index}/{len(runs)}: {run.run_label}{f' lr {lr}' if lr is not None else ''}{f' {variant}' if variant else ''} seed {seed}", file=sys.stderr)
+            code = log.code = backend.run(run, extra)
+            if code != 0:
+                failed.append(f"{run.run_label} lr {lr} {variant} seed {seed}")
     if failed:
         print(f"\n{len(failed)}/{len(runs)} runs failed: {', '.join(failed)}", file=sys.stderr)
         sys.exit(1)

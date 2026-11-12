@@ -26,6 +26,7 @@ from data_tools.load import cv_folds, load_data
 from models import REGISTRY, CYPModel
 from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
+from models.run_log import changed_flags, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
 from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
 
@@ -790,6 +791,12 @@ def main() -> None:
     )
     parser.add_argument("--plots-dir", type=Path, default=RESULTS_DIR / "plots", help="Directory for --plots output")
     args = parser.parse_args()
+    with run_log("eval", changed_flags(args, parser)):
+        _run(parser, args)
+
+
+def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Evaluate the models for parsed arguments."""
     args.input = args.input or [["rdkit"]]
 
     if args.targets is not None and args.isoforms is not None:

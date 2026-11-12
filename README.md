@@ -138,7 +138,13 @@ evaluate-models      # train/val metrics for the sklearn-style models; see Repre
 plot-results         # redraw the evaluate-models plots from a saved --predictions-out CSV
 foundation-model     # list/alias trained chemprop and unimol runs and generate their feature caches (--list, --paths, --generate-cache)
 motif-report         # generate reports/pharmacophore_features.md from the pharmacophore motif table
+list-runs            # previous train-model / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
 ```
+
+`train-model` (one log per seed/config of a sweep) and `evaluate-models` write their output to
+`results/runs/<id>__<train|eval>__<flags>.log` while still printing it. The id counts up, and the filename lists the
+flags that differ from their default (`key=value`, `+` between list items). Each log starts with the full command and git
+commit and ends with a `# finished:` line holding status and duration.
 
 
 ## Representations
