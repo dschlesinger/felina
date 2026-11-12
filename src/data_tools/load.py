@@ -8,8 +8,9 @@ import numpy as np
 import polars as pl
 
 from data_tools.split_column import _SCORED_DEFAULT, _butina_groups, _scaffold_groups, assign_blindlike_splits
+from data_tools.paths import DATA_DIR
 
-_DEFAULT_DATA_DIR = Path("data")
+_DEFAULT_DATA_DIR = DATA_DIR
 
 # Label columns are sparse: in a multi-source merged table a column can be null
 # for the first thousands of rows, so polars' default 100-row schema inference
@@ -172,7 +173,7 @@ def load_data(
     val_fraction: float = 0.2,
     seed: int = 42,
     butina_cutoff: float = 0.4,
-    data_dir: Path = Path("data"),
+    data_dir: Path = DATA_DIR,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Load train.csv and return (train_df, val_df) split by split_type.
 

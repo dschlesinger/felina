@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from models.plots import PLOT_KINDS, rows_from_predictions, show_terminal, usable_kinds, write_files
+from data_tools.paths import DATA_DIR, RESULTS_DIR
 
 
 def main() -> None:
@@ -18,13 +19,13 @@ def main() -> None:
         help="Plots to draw (default: all that the inputs allow). heldout-skew needs only the predictions CSV; "
         "train-test also needs the blind-set predictions (the .blind.csv written next to --predictions-out)",
     )
-    parser.add_argument("--plots-dir", type=Path, default=Path("results/plots"), help="Directory for the PNGs")
+    parser.add_argument("--plots-dir", type=Path, default=RESULTS_DIR / "plots", help="Directory for the PNGs")
     parser.add_argument("--plots-terminal", action="store_true", help="Also draw the plots in the terminal")
     parser.add_argument(
         "--blind-predictions", type=Path,
         help="Blind-set predictions CSV for train-test (default: <predictions>.blind.csv next to the input)",
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing data CSVs")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing data CSVs")
     parser.add_argument("--val-split", type=float, default=0.2, help="Validation fraction used in the run")
     parser.add_argument("--butina-cutoff", type=float, default=0.4, help="Butina cutoff used in the run")
     args = parser.parse_args()

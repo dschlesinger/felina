@@ -14,6 +14,7 @@ from rich.table import Table
 from data_tools import dataset_alias
 from data_tools.dataset_spec import Source
 from data_tools.datasets import Dataset, registry
+from data_tools.paths import DATA_DIR
 
 console = Console()
 
@@ -155,7 +156,7 @@ def _alias(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the data CLI."""
     parser = argparse.ArgumentParser(description="Manage the project's datasets.")
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory holding the datasets (default: data)")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory holding the datasets (default: DATA_FOLDER, else data)")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("list", help="List every known dataset with its status").set_defaults(run=_list)

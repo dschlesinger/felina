@@ -18,6 +18,7 @@ from data_tools.representations_cli import _molecules
 from representations.chemprop_weights import cache_name as chemprop_cache_name
 from representations.foundation_alias import ensure_aliases
 from representations.unimol import cache_name as unimol_cache_name
+from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
 
 _MODEL_CHARS = 10
 
@@ -60,7 +61,7 @@ class Kind:
 KINDS = {
     "chemprop": Kind(
         "chemprop",
-        Path("results/chemprop"),
+        RESULTS_DIR / "chemprop",
         "FOUNDATION_MODEL_HOME",
         re.compile(r"seed(?P<seed>\d+)"),
         "{seed}",
@@ -69,7 +70,7 @@ KINDS = {
     ),
     "unimol": Kind(
         "unimol",
-        Path("results/unimol"),
+        RESULTS_DIR / "unimol",
         "UNIMOL_MODEL_HOME",
         re.compile(r"lr_(?P<lr>[0-9.]+(?:e[+-]?\d+)?)_seed_(?P<seed>\d+)"),
         "lr{lr}_s{seed}",
@@ -186,8 +187,8 @@ def main() -> None:
         default="all",
         help="Which kind of model to manage: chemprop[...] or unimol[...] inputs (default: all that exist)",
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing train.csv and test.csv")
-    parser.add_argument("--cache-dir", type=Path, default=Path("data/features"), help="Directory for cached feature matrices")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing train.csv and test.csv")
+    parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
     args = parser.parse_args()
 
     if not (args.list or args.paths or args.generate_cache):

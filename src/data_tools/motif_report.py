@@ -15,6 +15,7 @@ import numpy as np
 import polars as pl
 
 import representations.cyp_pharmacophore as cp
+from data_tools.paths import DATA_DIR
 
 _DEFAULT_OUT = Path("reports/pharmacophore_features.md")
 
@@ -118,8 +119,8 @@ def build_report(train_df: pl.DataFrame, test_df: pl.DataFrame) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate the pharmacophore motif report.")
-    parser.add_argument("--train", default="data/train.csv")
-    parser.add_argument("--test", default="data/test.csv")
+    parser.add_argument("--train", default=str(DATA_DIR / "train.csv"))
+    parser.add_argument("--test", default=str(DATA_DIR / "test.csv"))
     parser.add_argument("--out", default=str(_DEFAULT_OUT))
     args = parser.parse_args()
 

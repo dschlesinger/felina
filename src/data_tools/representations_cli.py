@@ -16,6 +16,7 @@ from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from data_tools.load import load_data, load_test, load_train
 from representations.embedding_metrics import evaluate_embedding, evaluate_shift, fingerprint_shift
 from representations.foundation_alias import ALIAS_FILE, set_alias
+from data_tools.paths import DATA_DIR, FEATURE_DIR
 
 console = Console()
 
@@ -267,8 +268,8 @@ def main() -> None:
         metavar=("PATH", "ALIAS"),
         help=f"Give a foundation-model weights path a short alias, usable as chemprop[ALIAS] or unimol[ALIAS]. Saved in {ALIAS_FILE}.",
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing train.csv and test.csv")
-    parser.add_argument("--cache-dir", type=Path, default=Path("data/features"), help="Directory for cached feature matrices")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing train.csv and test.csv")
+    parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
     args = parser.parse_args()
 
     if not args.check and not args.embed and not args.alias and not args.evaluate:

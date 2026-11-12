@@ -30,6 +30,7 @@ from data_tools.dataset_spec import Source
 from data_tools.datasets import registry
 from data_tools.overlap import add_keys, add_stereo_keys, collapse_duplicates, overlap_report
 from data_tools.split_column import _SPLIT_COLUMN, assign_blindlike_splits, assign_splits
+from data_tools.paths import DATA_DIR
 
 _KEY = "inchikey_block"
 _STEREO_KEY = "inchikey_full"
@@ -94,8 +95,8 @@ def _load(source: Source, data_dir: Path, isoforms: list[str] | None) -> tuple[p
 
 def merge(
     datasets: dict[str, list[str] | None],
-    data_dir: Path = Path("data"),
-    test_path: Path | None = Path("data/test.csv"),
+    data_dir: Path = DATA_DIR,
+    test_path: Path | None = DATA_DIR / "test.csv",
     split_strategy: str = "scaffold",
     split_seed: int = 0,
     val_fraction: float = 0.1,

@@ -18,6 +18,7 @@ import torch
 from data_tools.merge_datasets import parse_dataset_specs
 from models.training.base import Backend
 from models.training.common import prepare_joint_split, write_val_outputs
+from data_tools.paths import RESULTS_DIR
 
 
 def set_seed(seed: int) -> None:
@@ -44,7 +45,7 @@ def check_cuda() -> None:
 
 
 class UnimolBackend(Backend):
-    results_dir = Path("results/unimol")
+    results_dir = RESULTS_DIR / "unimol"
     requires_datasets = True
     defaults = {"epochs": 30}
 
@@ -69,7 +70,7 @@ class UnimolBackend(Backend):
         if use_cuda:
             check_cuda()
 
-        base_dir = args.output_dir or Path("results/unimol") / args.run_label
+        base_dir = args.output_dir or RESULTS_DIR / "unimol" / args.run_label
         output_dir = base_dir / f"lr_{args.learning_rate}_seed_{args.seed}"
         output_dir.mkdir(parents=True, exist_ok=True)
 

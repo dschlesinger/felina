@@ -24,6 +24,7 @@ from representations.unimol import cache_name as unimol_cache_name
 from representations.unimol import parse_spec as parse_unimol_spec
 from representations.cyp_mech import CYPMechanisticBlock
 from representations.cyp_xtb import XTBElectronic, XTBSolvation
+from data_tools.paths import FEATURE_DIR
 
 _rdkit = RDKitDescriptors()
 _chemeleon = CheMeleon()
@@ -182,7 +183,7 @@ def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.nda
 def featurize(
     df: pl.DataFrame,
     input_names: str | list[str],
-    cache_dir: Path = Path("data/features"),
+    cache_dir: Path = FEATURE_DIR,
 ) -> np.ndarray:
     """Return feature matrix for df, computing only uncached molecules.
 

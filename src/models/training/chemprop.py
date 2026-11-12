@@ -58,6 +58,7 @@ import polars as pl
 from data_tools.inputs import featurize, is_known_input
 from data_tools.merge_datasets import parse_dataset_specs
 from models.training.base import Backend
+from data_tools.paths import RESULTS_DIR
 from models.training.common import merge_stage, slug
 
 
@@ -159,7 +160,7 @@ class ChempropBackend(Backend):
     def __init__(self, name: str, foundation: str | None = None) -> None:
         super().__init__(name)
         self.foundation = foundation
-        self.results_dir = Path("results/chemprop") / ("chemeleon" if foundation else "")
+        self.results_dir = RESULTS_DIR / "chemprop" / ("chemeleon" if foundation else "")
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--data-path", type=Path, default=None, help="CSV with a SMILES column and target column(s)")

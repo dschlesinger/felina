@@ -27,6 +27,7 @@ from models import REGISTRY, CYPModel
 from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
 from models.utils import drop_nan_rows, zero_nonfinite_features
+from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
 
 _CYP_TARGETS = [
     "CYP1A2_pIC50_direct_inhibition",
@@ -649,7 +650,7 @@ def _print_correlations(target: str, preds: dict[tuple[str, str], dict[int, floa
 def main() -> None:
     """Entry point for the evaluate-models CLI."""
     parser = argparse.ArgumentParser(description="Evaluate CYP models on a train/val split.")
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing data CSVs")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing data CSVs")
     parser.add_argument("--val-split", type=float, default=0.2, help="Validation fraction")
     parser.add_argument(
         "--split",
@@ -760,7 +761,7 @@ def main() -> None:
         help="Also write full-name result tables (and the correlation matrices if --correlation is set) to this "
         "markdown file; unlike the console tables, names are never truncated to the terminal width",
     )
-    parser.add_argument("--cache-dir", default="data/features", help="Directory for cached feature matrices")
+    parser.add_argument("--cache-dir", default=FEATURE_DIR, help="Directory for cached feature matrices")
     parser.add_argument("--sort-by", default="MAE", choices=_METRICS, help="Metric to sort results by")
     parser.add_argument(
         "--predictions-out", type=Path,
@@ -787,7 +788,7 @@ def main() -> None:
         "Uses inline images (kitty, WezTerm, ghostty, iTerm2) and falls back to text plots (plotext), "
         "wrapped to the terminal width, anywhere else",
     )
-    parser.add_argument("--plots-dir", type=Path, default=Path("results/plots"), help="Directory for --plots output")
+    parser.add_argument("--plots-dir", type=Path, default=RESULTS_DIR / "plots", help="Directory for --plots output")
     args = parser.parse_args()
     args.input = args.input or [["rdkit"]]
 
@@ -1032,7 +1033,7 @@ def main() -> None:
         if args.plots_terminal:
             show_terminal(args.plots, plot_rows)
     if args.predict_blind:
-        out_dir = Path("results")
+        out_dir = RESULTS_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         for (name, input_label), by_target in blind_preds.items():
             path = out_dir / f"{re.sub(r'[^\w+.-]', '_', name)}_{re.sub(r'[^\w+.-]', '_', input_label.replace(' + ', '+'))}_blind_predictions.csv"

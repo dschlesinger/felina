@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+from data_tools.paths import RESULTS_DIR
 
 
 class Backend:
@@ -12,7 +13,7 @@ class Backend:
     #: Per-backend defaults for the shared flags (epochs, ...).
     defaults: dict[str, object] = {}
     #: Where runs go by default (used to lay out a datasets x seeds grid).
-    results_dir = Path("results")
+    results_dir = RESULTS_DIR
     #: Needs --datasets (chemprop can instead take --data-path or --stage).
     requires_datasets = False
 

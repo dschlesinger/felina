@@ -15,6 +15,7 @@ from sklearn.metrics import mean_squared_error
 
 from data_tools.merge_datasets import merge
 from data_tools.overlap import add_keys
+from data_tools.paths import DATA_DIR
 
 
 def slug(specs: list[str]) -> str:
@@ -35,7 +36,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "named {isoform}-{source}, e.g. bindingdb:CYP2D6,CYP1A2 tdi. Every config is trained once per seed.",
     )
     parser.add_argument("--list-datasets", action="store_true", help="List selectable datasets and exit")
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Where the source CSVs live (default: data)")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Where the source CSVs live (default: DATA_FOLDER, else data)")
     parser.add_argument(
         "--split-strategy",
         default="scaffold",

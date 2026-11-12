@@ -9,6 +9,10 @@ python3 -m venv .venv
 ./.venv/bin/python -m pip install -e .   # installs requirements.txt and registers the CLI entry points (data, train-model, evaluate-models, ...)
 ```
 
+Folders default to `data/`, `data/features/` and `results/`. To put them elsewhere, copy `.env.example` to `.env` in the
+working directory and set `DATA_FOLDER`, `FEATURE_FOLDER` (default `<DATA_FOLDER>/features`) and `RESULTS_FOLDER`. A
+variable already set in the shell wins over the file, and a command-line flag such as `--data-dir` wins over both.
+
 ## Data
 
 ```bash
