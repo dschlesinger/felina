@@ -22,6 +22,7 @@ representations = "data_tools.representations_cli:main"
 foundation-model = "models.foundation_model:main"
 data = "data_tools.data_cli:main"
 list-runs = "models.run_log:main"
+download-leaderboard = "data_tools.download_leaderboard:main"
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
