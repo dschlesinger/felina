@@ -53,7 +53,7 @@ def validation_prediction(
         raise ValueError(
             f"Unknown input(s): {unknown}. "
             f"Use registered inputs {list(INPUT_REGISTRY)} "
-            "or chemprop[path-or-alias] / unimol[path-or-alias]."
+            "or chemprop[path-or-alias] / unimol[path-or-alias] / atom_jepa[path-or-alias]."
         )
     
     if not input_names:

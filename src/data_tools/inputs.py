@@ -7,6 +7,8 @@ import numpy as np
 import polars as pl
 
 from representations.atom_jepa import AtomJEPA, AtomJEPABio
+from representations.atom_jepa import cache_name as atom_jepa_cache_name
+from representations.atom_jepa import parse_spec as parse_atom_jepa_spec
 from representations.chemeleon import CheMeleon
 from representations.chemprop_weights import ChempropWeights, cache_name, parse_spec
 from representations.rdkit_descriptors import RDKitDescriptors
@@ -137,8 +139,13 @@ INPUT_REGISTRY: dict[str, Callable[[pl.DataFrame], np.ndarray]] = {
 
 
 def is_known_input(name: str) -> bool:
-    """True for a registered input or a `chemprop[/path/to/weights]` or `unimol[/path/to/model_0.pth]` spec."""
-    return name in INPUT_REGISTRY or parse_spec(name) is not None or parse_unimol_spec(name) is not None
+    """True for a registered input or a `chemprop[/path]`, `unimol[/path/to/model_0.pth]` or `atom_jepa[/path/encoder.pt]` spec."""
+    return (
+        name in INPUT_REGISTRY
+        or parse_spec(name) is not None
+        or parse_unimol_spec(name) is not None
+        or parse_atom_jepa_spec(name) is not None
+    )
 
 
 def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.ndarray:
@@ -156,10 +163,13 @@ def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.nda
     cache_dir.mkdir(parents=True, exist_ok=True)
     weights = parse_spec(input_name)
     unimol_weights = parse_unimol_spec(input_name)
+    atom_jepa_spec = parse_atom_jepa_spec(input_name)
     if weights is not None:
         stem = cache_name(input_name)
     elif unimol_weights is not None:
         stem = unimol_cache_name(input_name)
+    elif atom_jepa_spec is not None:
+        stem = atom_jepa_cache_name(input_name)
     else:
         stem = input_name
     npy_path = cache_dir / f"{stem}.npy"
@@ -178,6 +188,10 @@ def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.nda
             new_features = ChempropWeights(weights).transform(missing_df["SMILES"])
         elif unimol_weights is not None:
             new_features = UniMol(unimol_weights).transform(missing_df["SMILES"])
+        elif atom_jepa_spec is not None:
+            kind, path = atom_jepa_spec
+            encoder = AtomJEPABio if kind == "atom_jepa_bio" else AtomJEPA
+            new_features = encoder(path=path).transform(missing_df["SMILES"])
         else:
             new_features = INPUT_REGISTRY[input_name](missing_df)
         full = np.vstack([np.load(str(npy_path)), new_features]) if npy_path.exists() else new_features
@@ -206,6 +220,6 @@ def featurize(
     names = [input_names] if isinstance(input_names, str) else input_names
     unknown = [n for n in names if not is_known_input(n)]
     if unknown:
-        raise ValueError(f"Unknown input(s): {unknown}. Available: {list(INPUT_REGISTRY.keys())} or chemprop[/path/to/weights] or unimol[/path/to/model_0.pth]")
+        raise ValueError(f"Unknown input(s): {unknown}. Available: {list(INPUT_REGISTRY.keys())} or chemprop[/path/to/weights], unimol[/path/to/model_0.pth] or atom_jepa[/path/encoder.pt]")
     arrays = [_featurize_one(df, name, cache_dir) for name in names]
     return arrays[0] if len(arrays) == 1 else np.hstack(arrays)

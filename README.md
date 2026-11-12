@@ -59,6 +59,8 @@ Pick the model with `--model`:
 | `chemprop` | Chemprop D-MPNN from scratch |
 | `chemeleon` | Chemprop started from the CheMeleon foundation weights |
 | `unimol` | Uni-Mol fine-tuned (needs `unimol_tools`; uses the GPU if available, `--cpu` to force CPU) |
+| `atom_jepa` | Atom-JEPA `molecules` encoder fine-tuned with an MLP head (needs `atom-jepa`; GPU recommended) |
+| `atom_jepa_bio` | same, started from the Atom-JEPA-Bio encoder (`molecules` continued on PCBA bioassays) |
 
 ```bash
 train-model --list-datasets                     # selectable sources
@@ -89,9 +91,17 @@ no `challenge` in the config its labels are just not trained on. For `unimol`, e
 challenge head is then scored with the same-isoform auxiliary head, so that RMSE carries a
 cross-assay calibration offset. Each head keeps its own scale and missing labels
 are masked in the loss. With several runs, outputs go to
-`<output-dir>/<config>/seed<N>` (default `results/chemprop/`, `results/chemprop/chemeleon/` or `results/unimol/`). Shared flags:
+`<output-dir>/<config>/seed<N>` (default `results/chemprop/`, `results/chemprop/chemeleon/`, `results/unimol/`, `results/atom_jepa/` or `results/atom_jepa_bio/`). Shared flags:
 `--target-columns`, `--split-strategy`, `--split-seed`, `--epochs`, `--seed`,
 `--output-dir`.
+
+`atom_jepa` and `atom_jepa_bio` early-stop whichever datasets are listed: the labelled training
+molecules are split by scaffold into a fit set and a holdout (`--holdout-frac`, default 0.1),
+training stops after `--patience` epochs (default 5) without a better holdout masked MAE, and the best
+epoch's weights are kept. The pinned challenge val split is only scored, never used to pick the epoch.
+Other flags: `--learning-rate` (swept like seeds), `--head-lr-mult`, `--batch-size`, `--workers`
+(conformer generation). Each run writes `encoder.pt` (an `atom_jepa[...]` / `atom_jepa_bio[...]` input)
+and `head.pt` under `<config>/lr_<lr>_seed_<N>/`.
 
 Chemprop training options (`src/models/chemprop_ext.py` patches them into
 `chemprop train`; `train-model` runs chemprop through it):
@@ -136,7 +146,7 @@ Every command takes `--help`.
 ```bash
 evaluate-models      # train/val metrics for the sklearn-style models; see Representations and Ensembling
 plot-results         # redraw the evaluate-models plots from a saved --predictions-out CSV
-foundation-model     # list/alias trained chemprop and unimol runs and generate their feature caches (--list, --paths, --generate-cache)
+foundation-model     # list/alias trained chemprop, unimol and Atom-JEPA runs and generate their feature caches, plus the pretrained chemeleon, unimol, atom_jepa and atom_jepa_bio (--list, --paths, --generate-cache)
 motif-report         # generate reports/pharmacophore_features.md from the pharmacophore motif table
 list-runs            # previous train-model / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
 ```
@@ -342,7 +352,7 @@ models saw in training. Validation informs selection, so validation metrics are
 development results.
 
 Feature models do not use auxiliary target columns, but can use embeddings from
-auxiliary-trained checkpoints (`chemprop[...]`, `unimol[...]` inputs).
+auxiliary-trained checkpoints (`chemprop[...]`, `unimol[...]`, `atom_jepa[...]`, `atom_jepa_bio[...]` inputs).
 Checkpoints must not have been trained on held-out labels. Record their resolved
 paths and hashes, keep weights immutable, and use fresh caches when changing them.
 

@@ -412,7 +412,7 @@ def _resolve_inputs(groups: list[list[str]]) -> list[list[str]]:
 
 def _short(label: str) -> str:
     """Shorten `chemprop[/long/path/best.pt]` to `chemprop[best.pt]` for display."""
-    return re.sub(r"(chemprop|unimol)\[([^\]]*)\]", lambda m: f"{m.group(1)}[{Path(m.group(2)).name}]", label)
+    return re.sub(r"(chemprop|unimol|atom_jepa_bio|atom_jepa)\[([^\]]*)\]", lambda m: f"{m.group(1)}[{Path(m.group(2)).name}]", label)
 
 
 def _ellipsize(text: str, width: int) -> str:

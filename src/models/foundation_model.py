@@ -1,4 +1,4 @@
-"""CLI for managing trained foundation models (chemprop runs and fine-tuned Uni-Mol runs)."""
+"""CLI for managing trained foundation models (chemprop runs and fine-tuned Uni-Mol and Atom-JEPA runs)."""
 
 import argparse
 import os
@@ -18,6 +18,7 @@ from data_tools.representations_cli import _molecules
 from representations.chemprop_weights import cache_name as chemprop_cache_name
 from representations.foundation_alias import ensure_aliases
 from representations.unimol import cache_name as unimol_cache_name
+from representations.atom_jepa import cache_name as atom_jepa_cache_name
 from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
 
 _MODEL_CHARS = 10
@@ -77,6 +78,18 @@ KINDS = {
         Path("model_0.pth"),
         unimol_cache_name,
     ),
+    **{
+        name: Kind(
+            name,
+            RESULTS_DIR / name,
+            f"{name.upper()}_MODEL_HOME",
+            re.compile(r"lr_(?P<lr>[0-9.]+(?:e[+-]?\d+)?)_seed_(?P<seed>\d+)"),
+            "lr{lr}_s{seed}",
+            Path("encoder.pt"),
+            atom_jepa_cache_name,
+        )
+        for name in ("atom_jepa", "atom_jepa_bio")
+    },
 }
 HOME_ENV = KINDS["chemprop"].home_env
 DEFAULT_HOME = KINDS["chemprop"].default_home
@@ -167,6 +180,31 @@ def _generate_caches(kind: Kind, models: list[tuple[str, list[Path]]], data_dir:
     return generated
 
 
+# `--type` words that narrow both the fine-tuned runs and the pretrained models to those whose name has this part
+# (a run's name is its path under the model home: chemeleon runs live under results/chemprop/chemeleon/, and the
+# pretrained model is `chemeleon`). They combine with the others: `--type finetuned chemeleon`.
+FILTERS: dict[str, Callable[[str], bool]] = {"chemeleon": lambda name: "chemeleon" in Path(name).parts}
+_GROUPS = ("all", "finetuned", "pretrained")
+PRETRAINED = ("chemeleon", "unimol", "atom_jepa", "atom_jepa_bio")  # registered inputs that are foundation models without a training run
+
+
+def _generate_pretrained(names: list[str], data_dir: Path, cache_dir: Path) -> int:
+    """Embed the train+test molecules with each named pretrained (not fine-tuned) model that has no feature cache yet."""
+    molecules = None
+    generated = 0
+    for name in names:
+        stem = cache_dir / name
+        if stem.with_suffix(".npy").exists() and stem.with_suffix(".idx").exists():
+            print(f"pretrained: {name}: cached")
+            continue
+        if molecules is None:
+            molecules = _molecules(data_dir)
+        print(f"pretrained: {name}: generating cache for {len(molecules)} molecules")
+        featurize(molecules, [name], cache_dir)
+        generated += 1
+    return generated
+
+
 def main() -> None:
     """Entry point for the foundation-model CLI."""
     parser = argparse.ArgumentParser(
@@ -179,13 +217,21 @@ def main() -> None:
     parser.add_argument(
         "--generate-cache",
         action="store_true",
-        help="Generate the feature cache (train+test molecules) for every run that doesn't have one",
+        help="Generate the feature cache (train+test molecules) for every run that doesn't have one, and for the pretrained "
+        + ", ".join(PRETRAINED),
     )
     parser.add_argument(
         "--type",
-        choices=["all", *KINDS],
-        default="all",
-        help="Which kind of model to manage: chemprop[...] or unimol[...] inputs (default: all that exist)",
+        nargs="+",
+        choices=[*_GROUPS, *KINDS, *FILTERS],
+        default=["all"],
+        help="What to manage, any combination: all (default), finetuned (every trained run), pretrained (the non-fine-tuned "
+        + ", ".join(PRETRAINED)
+        + ", with --generate-cache), a kind ("
+        + ", ".join(KINDS)
+        + "), and filters ("
+        + ", ".join(FILTERS)
+        + ") that keep only the matching models, e.g. --type finetuned chemeleon (a filter alone covers both fine-tuned and pretrained)",
     )
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing train.csv and test.csv")
     parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
@@ -195,26 +241,37 @@ def main() -> None:
         parser.print_help()
         return
 
-    kinds = list(KINDS.values()) if args.type == "all" else [KINDS[args.type]]
+    filters = [FILTERS[t] for t in args.type if t in FILTERS]
+    explicit = [t for t in args.type if t in KINDS]
+    only_filters = all(t in FILTERS for t in args.type)  # a filter alone covers fine-tuned and pretrained
+    every_kind = "all" in args.type or "finetuned" in args.type or only_filters
+    kinds = list(KINDS.values()) if every_kind else [KINDS[t] for t in explicit]
+    pretrained = [n for n in PRETRAINED if all(f(n) for f in filters)] if "all" in args.type or "pretrained" in args.type or only_filters else []
+    if not kinds and not args.generate_cache:
+        parser.error("--type pretrained only applies with --generate-cache")
     found = False
     generated = 0
     for kind in kinds:
         home = kind.home()
-        models = list_models(home, kind) if home.is_dir() else []
+        every_model = list_models(home, kind) if home.is_dir() else []
+        models = [(name, weights) for name, weights in every_model if all(f(name) for f in filters)]
         if not models:
-            if args.type != "all":
+            if explicit and not filters:
                 reason = "does not exist" if not home.is_dir() else "holds no models"
                 print(f"{kind.name} model home {home} {reason} (set ${kind.home_env} to change it)", file=sys.stderr)
                 sys.exit(1)
             continue
         found = True
-        aliases = _assign_aliases(kind, models)
+        aliases = _assign_aliases(kind, every_model)  # from all runs, so a filter never changes a run's alias
         if args.generate_cache:
             generated += _generate_caches(kind, models, args.data_dir, args.cache_dir)
         elif args.paths:
             _print_paths(kind, models, aliases)
         else:
             _print_models(kind, home, models, aliases)
+    if args.generate_cache and pretrained:
+        found = True  # pretrained models need no run directory
+        generated += _generate_pretrained(pretrained, args.data_dir, args.cache_dir)
     if not found:
         print("No models found in " + ", ".join(str(k.home()) for k in kinds), file=sys.stderr)
         sys.exit(1)

@@ -25,7 +25,7 @@ if [ ! -f data/train.csv ] || [ ! -d data/metabolism ]; then
     exit 1
 fi
 
-# Extra args pass through to train-model (--model chemprop|chemeleon|unimol). One model is trained per
+# Extra args pass through to train-model (--model chemprop|chemeleon|unimol|atom_jepa|atom_jepa_bio). One model is trained per
 # (--datasets config x --learning-rate x seed):
 #   qsub scripts/train_model.qsub --model unimol --n-seeds 3 --learning-rate 5e-5 2e-4 5e-4 \
 #        --datasets challenge --datasets challenge pubchem:CYP1A2 --datasets pubchem:CYP1A2
