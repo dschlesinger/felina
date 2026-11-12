@@ -12,14 +12,27 @@ python3 -m venv .venv
 ## Data
 
 ```bash
-data list                  # every known dataset with status, rows, size
+data list                  # every known dataset with status, rows, size, and what it trains as
 data fetch NAME [NAME...]  # fetch by name or alias (or `all`), then derive the model-ready table
+data fetch NAME --redownload   # fetch the raw files again instead of reusing what is here
 data remove NAME           # delete a dataset's raw and derived files
 data alias NAME ALIAS      # short alias, stored in data-alias.csv
 download-data              # same as `data fetch all`
 ```
 
-Datasets are recipes in `src/data_tools/datasets.py`: a `fetch` step from the source and an optional `derive` step.
+Fetching reuses raw files that are already on disk; `--redownload` goes back to the source. The derive step runs
+either way, so changing a reshape and re-running `data fetch NAME` rebuilds the model-ready table without
+touching the network. That matters most for `p450_family`, whose fetch crawls UniProt, ChEMBL, and BindingDB for
+hundreds of proteins, and for `pubchem_aid1851`, whose raw table is ~24 MB.
+
+Each dataset lives under `src/data_tools/dataset_defs/` and holds everything it needs: its source URL, its `fetch`
+step, an optional `derive` step, the files each writes, and the training heads the result offers (`--datasets
+NAME:ISO`). A simple dataset is one module (`train.py`); one that brings its own crawling or reshaping code is a
+directory holding that code next to the spec (`pubchem_aid1851/`, `p450_family/`); `metabolism/` just groups
+related datasets. Adding a dataset means adding a module there and changing nothing else —
+`data_tools.datasets.registry()` discovers it, `data list` shows it, and `--datasets` accepts it. See
+`src/data_tools/dataset_spec.py` for the fields.
+
 `pubchem_aid1851` yields per-isoform auxiliary heads; `p450_family` (ChEMBL + BindingDB, Pfam PF00067) yields one
 `{gene}_{readout}_{source}` head per protein per source (IC50 only by default, so `{gene}_pIC50_{source}`).
 

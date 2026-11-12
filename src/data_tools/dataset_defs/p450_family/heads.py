@@ -1,7 +1,7 @@
 """Reshape per-protein P450 family datasets into per-protein auxiliary heads.
 
 `data fetch p450_family` writes one CSV per protein with a single pooled
-`pAffinity` column (see data_tools.family_datasets). That shape cannot enter
+`pAffinity` column (see crawl.py next door). That shape cannot enter
 a merged multi-task table: every file would contribute a head named `pAffinity`, so two
 files collide, and the pooling hides IC50/Ki/Kd/EC50 from two databases inside
 one column where no task weighting can separate them.

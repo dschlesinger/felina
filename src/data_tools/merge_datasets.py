@@ -22,12 +22,12 @@ dropped.
 
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import polars as pl
 
+from data_tools.dataset_spec import Source
+from data_tools.datasets import registry
 from data_tools.overlap import add_keys, add_stereo_keys, collapse_duplicates, overlap_report
 from data_tools.split_column import _SPLIT_COLUMN, assign_blindlike_splits, assign_splits
 
@@ -37,134 +37,8 @@ _NAME = "Molecule_Name"
 _SCORED_SOURCE = "challenge"
 
 
-def _pivot_single_concentration(df: pl.DataFrame) -> pl.DataFrame:
-    """Long (molecule, enzyme) rows to one `{enzyme}_log2fc` column per enzyme."""
-    smiles = df.group_by(_NAME, maintain_order=True).agg(pl.col("SMILES").first())
-    wide = df.pivot(on="enzyme", index=_NAME, values="log2fc_estimate", aggregate_function="mean")
-    wide = wide.rename({c: f"{c}_log2fc" for c in wide.columns if c != _NAME})
-    return smiles.join(wide, on=_NAME, how="left")
-
-
-@dataclass(frozen=True)
-class Source:
-    """One selectable dataset: a file, how it joins, and how its columns become heads."""
-
-    filename: str
-    kind: str  # "inhouse" or "external"
-    # (regex with one group capturing the isoform/gene, head-name template)
-    heads: list[tuple[str, str]]
-    prepare: Callable[[pl.DataFrame], pl.DataFrame] | None = None
-    description: str = ""
-    task: str = "regression"  # "classification" for 0/1 labels
-    log10p1: bool = False  # label spans orders of magnitude: train on log10(x + 1)
-
-
 SOURCES: dict[str, Source] = {
-    "challenge": Source(
-        "train.csv",
-        "inhouse",
-        [(r"^(.+)_pIC50_direct_inhibition$", "{}-Direct")],
-        description="scored heads: direct-inhibition pIC50 (always included)",
-    ),
-    "tdi": Source(
-        "tdi_train.csv",
-        "inhouse",
-        [(r"^(.+)_pIC50_TDI_condition$", "{}-TDI")],
-        description="pIC50 under time-dependent-inhibition conditions",
-    ),
-    "emax": Source(
-        "emax_train.csv",
-        "inhouse",
-        [
-            (r"^(.+)_EmaxVsPosCtrl_TDI_condition$", "{}-Emax-TDI"),
-            (r"^(.+)_EmaxVsPosCtrl_direct_inhibition$", "{}-Emax-Direct"),
-        ],
-        description="Emax vs positive control, TDI and direct conditions",
-    ),
-    "single_conc": Source(
-        "single_concentration_train.csv",
-        "inhouse",
-        [(r"^(.+)_log2fc$", "{}-SingleConc")],
-        prepare=_pivot_single_concentration,
-        description="log2 fold change at one concentration (50 uM)",
-    ),
-    "pubchem": Source(
-        "pubchem_aid1851.csv",
-        "external",
-        [
-            (r"^(.+)_pIC50_aid1851$", "{}-PubChem"),
-            (r"^(.+)_pctinhib_aid1851$", "{}-PubChem-pctinhib"),
-        ],
-        description="PubChem AID 1851 qHTS panel: pIC50 and percent inhibition",
-    ),
-    "expansionrx": Source(
-        "metabolism/expansionrx.csv",
-        "external",
-        [(r"^(HLM|MLM) CLint$", "{}-ExpansionRx")],
-        log10p1=True,
-        description="ExpansionRx microsomal CLint (human, mouse), log10(x+1)",
-    ),
-    "tdc_hlm": Source(
-        "metabolism/tdc_hlm.csv",
-        "external",
-        [(r"^(Y)$", "HLM-TDC")],
-        task="classification",
-        description="TDC human liver microsomal stability, binary",
-    ),
-    "tdc_rlm": Source(
-        "metabolism/tdc_rlm.csv",
-        "external",
-        [(r"^(Y)$", "RLM-TDC")],
-        task="classification",
-        description="TDC rat liver microsomal stability, binary",
-    ),
-    "tdc_clearance_microsome_az": Source(
-        "metabolism/tdc_clearance_microsome_az.csv",
-        "external",
-        [(r"^(Y)$", "MicrosomeClearance-AZ")],
-        log10p1=True,
-        description="TDC AstraZeneca microsomal clearance, log10(x+1)",
-    ),
-    "tdc_half_life_obach": Source(
-        "metabolism/tdc_half_life_obach.csv",
-        "external",
-        [(r"^(Y)$", "HalfLife-Obach")],
-        log10p1=True,
-        description="TDC Obach half-life, log10(x+1)",
-    ),
-    "tdc_cyp2c9_substrate": Source(
-        "metabolism/tdc_cyp2c9_substrate.csv",
-        "external",
-        [(r"^(Y)$", "CYP2C9-Substrate")],
-        task="classification",
-        description="TDC CYP2C9 substrate, binary",
-    ),
-    "tdc_cyp2d6_substrate": Source(
-        "metabolism/tdc_cyp2d6_substrate.csv",
-        "external",
-        [(r"^(Y)$", "CYP2D6-Substrate")],
-        task="classification",
-        description="TDC CYP2D6 substrate, binary",
-    ),
-    "tdc_cyp3a4_substrate": Source(
-        "metabolism/tdc_cyp3a4_substrate.csv",
-        "external",
-        [(r"^(Y)$", "CYP3A4-Substrate")],
-        task="classification",
-        description="TDC CYP3A4 substrate, binary",
-    ),
-    "chembl": Source(
-        "family_heads.csv",
-        "external",
-        [(r"^(.+)_pIC50_chembl$", "{}-ChEMBL")],
-        description="ChEMBL pIC50 across the P450 family",
-    ),
-    "bindingdb": Source(
-        "family_heads.csv",
-        "external",
-        [(r"^(.+)_pIC50_bindingdb$", "{}-BindingDB")],
-        description="BindingDB pIC50 across the P450 family",
-    ),
+    name: source for dataset in registry().values() for name, source in dataset.sources.items()
 }
 
 
