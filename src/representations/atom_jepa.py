@@ -81,9 +81,31 @@ class AtomJEPA(Representation):
             out = self._model.embed(smiles)
         return np.asarray(out.detach().cpu().numpy() if hasattr(out, "detach") else out, dtype=np.float64)
 
+    def _embed_oom_safe(self, smiles: list[str]) -> np.ndarray:
+        """Embed `smiles`, halving the sub-batch size on CUDA OOM (the smaller size sticks for later calls)."""
+        import torch
+
+        parts = []
+        start = 0
+        while start < len(smiles):
+            size = min(self._batch_size, len(smiles) - start)
+            try:
+                parts.append(self._embed(smiles[start : start + size]))
+                start += size
+            except torch.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if size == 1:
+                    raise
+                self._batch_size = max(1, size // 2)
+                tqdm.write(f"Atom-JEPA: CUDA OOM, batch size reduced to {self._batch_size}")
+        return np.concatenate(parts)
+
     def transform(self, smiles: pl.Series) -> np.ndarray:
         """Return a (n_molecules, 256) float64 array of Atom-JEPA embeddings."""
+        import torch
+
         self._ensure_loaded()
+        self._batch_size = getattr(self, "_batch_size", _BATCH_SIZE)
         smiles_list = smiles.to_list()
         out = np.full((len(smiles_list), _OUTPUT_DIM), np.nan, dtype=np.float64)
 
@@ -93,14 +115,19 @@ class AtomJEPA(Representation):
             if not valid:
                 continue
             try:
-                embeddings = self._embed([chunk[i] for i in valid])
+                embeddings = self._embed_oom_safe([chunk[i] for i in valid])
                 rows = list(zip(valid, embeddings))
+            except torch.OutOfMemoryError:
+                raise
             except (ValueError, RuntimeError):
                 # One molecule (e.g. a failed conformer) sank the batch: embed individually, NaN the failures.
+                # OOM is re-raised, not NaN'd: it says nothing about the molecule.
                 rows = []
                 for i in valid:
                     try:
-                        rows.append((i, self._embed([chunk[i]])[0]))
+                        rows.append((i, self._embed_oom_safe([chunk[i]])[0]))
+                    except torch.OutOfMemoryError:
+                        raise
                     except (ValueError, RuntimeError):
                         pass
             for i, embedding in rows:
