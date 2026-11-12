@@ -260,13 +260,15 @@ def main() -> None:
         nargs="+",
         metavar="REPRESENTATION",
         help="Compute and cache these representations for the train and test molecules "
-        "(a registered name, chemprop[/path/to/weights], unimol[/path/to/model_0.pth], atom_jepa[/path/encoder.pt], or 'all'). Only uncached molecules are computed.",
+        "(a registered name, chemprop[/path/to/weights], unimol[/path/to/model_0.pth], atom_jepa[/path/encoder.pt], "
+        "monroe[/path/to/checkpoint], or 'all'). Only uncached molecules are computed.",
     )
     parser.add_argument(
         "--alias",
         nargs=2,
         metavar=("PATH", "ALIAS"),
-        help=f"Give a foundation-model weights path a short alias, usable as chemprop[ALIAS], unimol[ALIAS] or atom_jepa[ALIAS]. Saved in {ALIAS_FILE}.",
+        help="Give a foundation-model weights path (or a monroe checkpoint directory) a short alias, usable as "
+        f"chemprop[ALIAS], unimol[ALIAS], atom_jepa[ALIAS] or monroe[ALIAS]. Saved in {ALIAS_FILE}.",
     )
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing train.csv and test.csv")
     parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
@@ -279,20 +281,27 @@ def main() -> None:
 
     if args.alias:
         path, alias = args.alias
-        if not Path(path).expanduser().is_file():
+        target = Path(path).expanduser()
+        if not target.exists():
             print(f"Warning: {path} does not exist (alias saved anyway)", file=sys.stderr)
         try:
             set_alias(path, alias)
         except ValueError as exc:
             parser.error(str(exc))
-        kind = "unimol" if Path(path).suffix == ".pth" else "atom_jepa" if Path(path).name == "encoder.pt" else "chemprop"
+        # a monroe checkpoint is a directory (config.json + weights.pt), the others a single weights file
+        kind = (
+            "unimol" if target.suffix == ".pth"
+            else "atom_jepa" if target.name == "encoder.pt"
+            else "monroe" if target.is_dir()
+            else "chemprop"
+        )
         console.print(f"[green]✓[/] {escape(f'{kind}[{alias}]')} -> {escape(str(Path(path).expanduser().resolve()))}", soft_wrap=True)
 
     if args.embed:
         names = list(INPUT_REGISTRY) if args.embed == ["all"] else args.embed
         unknown = [n for n in names if not is_known_input(n)]
         if unknown:
-            print(f"Unknown representation(s): {unknown}. Available: {list(INPUT_REGISTRY)} or chemprop[/path], unimol[/path] or atom_jepa[/path]", file=sys.stderr)
+            print(f"Unknown representation(s): {unknown}. Available: {list(INPUT_REGISTRY)} or chemprop[/path], unimol[/path], atom_jepa[/path] or monroe[/path]", file=sys.stderr)
             sys.exit(1)
         molecules = _molecules(args.data_dir)
         console.print(f"Embedding {len(molecules)} train+test molecules")
