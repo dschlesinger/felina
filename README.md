@@ -169,6 +169,8 @@ names below; several names are hstacked into one feature matrix.
 | `morgan` | `MorganFingerprint` | 2048 | Morgan/ECFP4 bits, radius 2 |
 | `count_morgan` | `CountMorganFingerprint` | 2048 | same generator, substructure counts |
 | `maccs` | `MACCS` | 167 | MACCS structural keys |
+| `avalon` | `AvalonFingerprint` | 1024 | Avalon fingerprint bits (RDKit `pyAvalonTools`) |
+| `count_avalon` | `CountAvalonFingerprint` | 1024 | same feature set, per-bit counts |
 | `mordred` | `MordredDescriptors` | 1613 | Mordred 2D descriptors (`mordredcommunity`); missing values encoded as 0 |
 | `xtb_solv_v1` | `XTBSolvation` | 9 | GFN2-xTB (`tblite`) ALPB water/octanol solvation, xTB logP, heuristic logD at pH 7.4; slow, see note below |
 | `xtb_elec_v1` | `XTBElectronic` | 24 | Boltzmann-averaged GFN2-xTB FMO energies, charges, SASA, shape, flexibility; shares conformers with `xtb_solv_v1` |
