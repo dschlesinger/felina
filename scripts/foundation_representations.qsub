@@ -1,5 +1,4 @@
 #!/bin/bash -l
-#$ -P buaisociety
 #$ -N foundation-representations
 #$ -j y
 #$ -o foundation_representations.qlog

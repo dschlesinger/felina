@@ -1,5 +1,4 @@
 #!/bin/bash -l
-#$ -P buaisociety
 #$ -N train_model
 #$ -j y
 #$ -o train_model.qlog

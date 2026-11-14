@@ -1,5 +1,4 @@
 #!/bin/bash -l
-#$ -P buaisociety
 #$ -N evaluate_models
 #$ -j y
 #$ -o evaluate_models.qlog
