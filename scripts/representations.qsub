@@ -25,15 +25,14 @@ if [ ! -f data/train.csv ] || [ ! -f data/test.csv ]; then
     exit 1
 fi
 
-# Extra args pass through to the representations CLI. Name what to embed: only molecules missing
-# from the cache are computed, so re-running after new data is cheap.
-#   qsub scripts/representations.qsub --embed chemeleon monroe
-#   qsub scripts/representations.qsub --embed unimol[/path/to/model_0.pth] atom_jepa[/path/encoder.pt]
-#   qsub scripts/representations.qsub --embed all          # includes the slow xtb blocks; give it 48h
-#   qsub scripts/representations.qsub --check              # what is cached and how complete it is
+# Args are the representations to embed; the script runs `representations --embed <args>`.
+# Only molecules missing from the cache are computed, so re-running after new data is cheap.
+#   qsub scripts/representations.qsub chemeleon monroe
+#   qsub scripts/representations.qsub unimol[/path/to/model_0.pth] atom_jepa[/path/encoder.pt]
+#   qsub scripts/representations.qsub all          # includes the slow xtb blocks; give it 48h
 if [ "$#" -eq 0 ]; then
-    echo "Pass arguments, e.g. --embed chemeleon monroe (or --embed all, --check)." >&2
+    echo "Pass the representations to embed, e.g. chemeleon monroe (or all)." >&2
     exit 1
 fi
 
-representations "$@"
+representations --embed "$@"
