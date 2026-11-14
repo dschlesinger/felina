@@ -864,12 +864,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--dimred",
+        nargs="+",
         default=None,
         metavar="METHOD[N]",
         help="Reduce each input set to N dimensions between featurization and the models: pca[N] (torch SVD, GPU "
         "when available), umap[N] (CPU) or pls[N] (supervised: fit per target, and per fold under --nfolds, on "
         "training rows only). pca and umap are fit on the whole train split, so under --nfolds they have seen the "
-        "held-out folds' features (not labels). Fits are cached under <cache-dir>/dimred. E.g. --dimred pca[256]",
+        "held-out folds' features (not labels). Fits are cached under <cache-dir>/dimred. Give several to evaluate "
+        "every input set under each of them, with 'none' for the unreduced features, e.g. --dimred pca[20] pls[8] none",
     )
     parser.add_argument("--cache-dir", default=FEATURE_DIR, help="Directory for cached feature matrices")
     parser.add_argument("--sort-by", default="MAE", choices=_METRICS, help="Metric to sort results by")
@@ -960,10 +962,11 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     filters = [] if args.nfolds is None or args.cv_filter == ["none"] else list(dict.fromkeys(args.cv_filter or ["r2", "RAE"]))
     dedup = args.nfolds is not None and not args.no_cv_deduplication
 
-    reduction = None
+    # Each input set is evaluated once per reduction; None is the unreduced features ('none', or no --dimred).
+    reductions: list[dimred.DimRed | None] = [None]
     if args.dimred is not None:
         try:
-            reduction = dimred.parse_spec(args.dimred)
+            reductions = list(dict.fromkeys(None if s == "none" else dimred.parse_spec(s) for s in args.dimred))
         except ValueError as exc:
             parser.error(str(exc))
 
@@ -1010,14 +1013,17 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
-    if (filters or dedup) and len(model_classes) * len(input_sets) < 2:
+    # Every (input set, reduction) pair is evaluated as its own input.
+    n_sets = len(input_sets) * len(reductions)
+    if (filters or dedup) and len(model_classes) * n_sets < 2:
         print("--cv-filter and deduplication only affect ensemble rows; with one model and one input they do nothing", file=sys.stderr)
 
     cache_dir = Path(args.cache_dir)
     dimred_dir = cache_dir / "dimred"
-    if reduction is not None and not reduction.supervised and args.nfolds is not None:
+    unsupervised = [str(r) for r in reductions if r is not None and not r.supervised]
+    if unsupervised and args.nfolds is not None:
         print(
-            f"--dimred {reduction} is fit on the whole train split, so the out-of-fold scores come from features "
+            f"--dimred {' '.join(unsupervised)} is fit on the whole train split, so the out-of-fold scores come from features "
             "that saw the held-out folds (no labels); expect them to be slightly optimistic",
             file=sys.stderr,
         )
@@ -1067,7 +1073,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     fits_per_target = sum(len(_effective_seeds(cls, seeds)) for cls in model_classes) * (
         1 if folds is None else args.nfolds
     )
-    progress = tqdm(total=fits_per_target * len(args.targets) * len(input_sets), desc="Training", unit="fit")
+    progress = tqdm(total=fits_per_target * len(args.targets) * n_sets, desc="Training", unit="fit")
     results: list[tuple[str, str, str, dict[str, float]]] = []
     cv_results: list[tuple[str, str, str, dict[str, float]]] = []
     prediction_rows: list[dict[str, object]] = []
@@ -1131,80 +1137,83 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
             cv_results.append((target, name, input_label, _cv_metrics(out["holdout"], data["y_train"], data["fold_ids"])))
 
     for input_names in input_sets:
-        input_label = " + ".join(input_names)
-        # Features don't depend on the target isoform, so compute once and reuse across isoforms.
-        train_features = zero_nonfinite_features(
-            featurize(train_df, input_names, cache_dir), f"train/{input_label}", train_df["SMILES"].to_list(),
+        base_label = " + ".join(input_names)
+        # Features don't depend on the target isoform or the reduction, so compute once and reuse.
+        base_train = zero_nonfinite_features(
+            featurize(train_df, input_names, cache_dir), f"train/{base_label}", train_df["SMILES"].to_list(),
         )
-        val_features = zero_nonfinite_features(
-            featurize(val_df, input_names, cache_dir), f"val/{input_label}", val_df["SMILES"].to_list(),
+        base_val = zero_nonfinite_features(
+            featurize(val_df, input_names, cache_dir), f"val/{base_label}", val_df["SMILES"].to_list(),
         )
-        blind_features = None
+        base_blind = None
         if blind_df is not None:
-            blind_features = zero_nonfinite_features(
-                featurize(blind_df, input_names, cache_dir), f"blind/{input_label}", blind_df["SMILES"].to_list(),
+            base_blind = zero_nonfinite_features(
+                featurize(blind_df, input_names, cache_dir), f"blind/{base_label}", blind_df["SMILES"].to_list(),
             )
-        if reduction is None and train_features.shape[1] > _TABPFN_WIDE and any(c.name == "tabpfn" for c in model_classes):
-            print(
-                f"WARNING: tabpfn gets {train_features.shape[1]} features from {input_label} and no --dimred is set; "
-                f"it no longer reduces them itself (it used PCA to {_TABPFN_WIDE}). "
-                f"Pass --dimred pca[{_TABPFN_WIDE}] to match earlier runs",
-                file=sys.stderr,
-            )
-        if reduction is not None:
-            input_label = f"{input_label} :: {reduction}"
-            if not reduction.supervised:
+        for reduction in reductions:
+            # Each reduction is its own input, labelled "<inputs> :: <spec>", scored and ensembled alongside the rest.
+            input_label = base_label if reduction is None else f"{base_label} :: {reduction}"
+            train_features, val_features, blind_features = base_train, base_val, base_blind
+            if reduction is None and base_train.shape[1] > _TABPFN_WIDE and any(c.name == "tabpfn" for c in model_classes):
+                print(
+                    f"WARNING: tabpfn gets {base_train.shape[1]} features from {base_label} and no --dimred is set; "
+                    f"it no longer reduces them itself (it used PCA to {_TABPFN_WIDE}). "
+                    f"Pass --dimred pca[{_TABPFN_WIDE}] to match earlier runs",
+                    file=sys.stderr,
+                )
+            if reduction is not None and not reduction.supervised:
                 # Unsupervised: fit once on every train-split row, shared by all isoforms.
                 reducer = dimred.fit(reduction, train_features, cache_dir=dimred_dir)
                 train_features = reducer.transform(train_features)
                 val_features = reducer.transform(val_features)
                 if blind_features is not None:
                     blind_features = reducer.transform(blind_features)
-        reduce = (
-            (lambda X, y: dimred.fit(reduction, X, y, cache_dir=dimred_dir))
-            if reduction is not None and reduction.supervised else None
-        )
-        for target in args.targets:
-            label = f"{target}, {input_label}"
-            X_train, y_train, train_mask = drop_nan_rows(
-                train_features, train_df[target].to_numpy(), label=f"train/{label}", return_mask=True,
+            # `spec=reduction` binds this loop's reduction, not whichever one the loop ends on.
+            reduce = (
+                (lambda X, y, spec=reduction: dimred.fit(spec, X, y, cache_dir=dimred_dir))
+                if reduction is not None and reduction.supervised else None
             )
-            X_val, y_val, val_mask = drop_nan_rows(
-                val_features, val_df[target].to_numpy(), label=f"val/{label}", return_mask=True,
-            )
-            val_index = np.flatnonzero(val_mask)
-            val_smiles = val_df["SMILES"].to_numpy()[val_mask] if args.predictions_out is not None else None
-            fold_ids = None if folds is None else folds[train_mask]
-            data = {
-                "y_train": y_train, "y_val": y_val, "fold_ids": fold_ids, "train_mask": train_mask,
-                "val_mask": val_mask, "val_index": val_index, "val_smiles": val_smiles,
-            }
-            prior = target_data.setdefault(target, data)
-            if prior is not data and not (
-                np.array_equal(prior["train_mask"], train_mask) and np.array_equal(prior["val_mask"], val_mask)
-            ):
-                misaligned.add(target)
-            # Reduced once per target and fold, then shared by every model class and seed.
-            views = _fold_views(X_train, y_train, X_val, blind_features, fold_ids, reduce)
-            collapsed = [
-                (cls.name, _collapse([_fit_members(
-                    cls, X_train, y_train, X_val, blind_features, fold_ids, seeds, progress, views=views,
-                )], member_method))
-                for cls in model_classes
-            ]
-            pairs.setdefault(target, []).extend((name, input_label, out) for name, out in collapsed)
-            rows = list(collapsed)
-            if len(collapsed) > 1 and ensembling:
-                out, report, log = _ensemble(collapsed, y_train, y_val, fold_ids, method, filters, dedup, label)
-                filter_log.extend({"target": target, "input": input_label, **row} for row in log)
-                if report is not None:
-                    stack_reports.append((target, input_label, method, *report))
-                rows.append((f"ensemble[{method}]", out))
-            for name, out in rows:
-                record(target, name, input_label, out, data)
+            for target in args.targets:
+                label = f"{target}, {input_label}"
+                X_train, y_train, train_mask = drop_nan_rows(
+                    train_features, train_df[target].to_numpy(), label=f"train/{label}", return_mask=True,
+                )
+                X_val, y_val, val_mask = drop_nan_rows(
+                    val_features, val_df[target].to_numpy(), label=f"val/{label}", return_mask=True,
+                )
+                val_index = np.flatnonzero(val_mask)
+                val_smiles = val_df["SMILES"].to_numpy()[val_mask] if args.predictions_out is not None else None
+                fold_ids = None if folds is None else folds[train_mask]
+                data = {
+                    "y_train": y_train, "y_val": y_val, "fold_ids": fold_ids, "train_mask": train_mask,
+                    "val_mask": val_mask, "val_index": val_index, "val_smiles": val_smiles,
+                }
+                prior = target_data.setdefault(target, data)
+                if prior is not data and not (
+                    np.array_equal(prior["train_mask"], train_mask) and np.array_equal(prior["val_mask"], val_mask)
+                ):
+                    misaligned.add(target)
+                # Reduced once per target and fold, then shared by every model class and seed.
+                views = _fold_views(X_train, y_train, X_val, blind_features, fold_ids, reduce)
+                collapsed = [
+                    (cls.name, _collapse([_fit_members(
+                        cls, X_train, y_train, X_val, blind_features, fold_ids, seeds, progress, views=views,
+                    )], member_method))
+                    for cls in model_classes
+                ]
+                pairs.setdefault(target, []).extend((name, input_label, out) for name, out in collapsed)
+                rows = list(collapsed)
+                if len(collapsed) > 1 and ensembling:
+                    out, report, log = _ensemble(collapsed, y_train, y_val, fold_ids, method, filters, dedup, label)
+                    filter_log.extend({"target": target, "input": input_label, **row} for row in log)
+                    if report is not None:
+                        stack_reports.append((target, input_label, method, *report))
+                    rows.append((f"ensemble[{method}]", out))
+                for name, out in rows:
+                    record(target, name, input_label, out, data)
 
     # Across inputs: one ensemble per target over every (model, input) pair.
-    if ensembling and len(input_sets) > 1 and not args.no_input_ensemble:
+    if ensembling and n_sets > 1 and not args.no_input_ensemble:
         for target, members in pairs.items():
             label = f"{target}, all inputs"
             if target in misaligned:
@@ -1267,7 +1276,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         f"[dim]input[/]="
         + escape(_short(" | ".join(" + ".join(g) for g in args.input)))
         + f"  [dim]split[/]={args.split}  [dim]seed[/]={args.seed}"
-        + (f"  [dim]dimred[/]={escape(str(reduction))}" if reduction else "")
+        + (f"  [dim]dimred[/]={escape(' '.join(args.dimred))}" if args.dimred else "")
         + (f"  [dim]nseeds[/]={args.nseeds}" if args.nseeds > 1 else "")
         + (f"  [dim]ensemble[/]={method}" if ensembling else "")
         + (f"  [dim]cv-filter[/]={'+'.join(filters)}" if filters else "")
@@ -1302,7 +1311,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.output_md:
         header = (
             f"input={_short(' | '.join(' + '.join(g) for g in args.input))}  split={args.split}  seed={args.seed}"
-            + (f"  dimred={reduction}" if reduction else "")
+            + (f"  dimred={' '.join(args.dimred)}" if args.dimred else "")
             + (f"  nseeds={args.nseeds}" if args.nseeds > 1 else "")
             + (f"  ensemble={method}" if ensembling else "")
         )
