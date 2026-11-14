@@ -63,6 +63,55 @@ def _write_blind_predictions(path: Path, rows: list[dict[str, object]]) -> None:
         raise OSError(f"Cannot write blind predictions CSV to {path}: {exc}") from exc
 
 
+def _unblinded_source(value: Path, data_dir: Path) -> Path:
+    """Resolve --unblinded, which takes a dataset name or alias, a filename in the data directory, or a path.
+
+    Raises FileNotFoundError naming what was tried if nothing resolves to an existing file.
+    """
+    from data_tools.dataset_alias import load_aliases
+    from data_tools.datasets import registry
+
+    tried: list[Path] = []
+    name = str(value)
+    if value.parent == Path("."):  # a bare word: a dataset name or alias before anything else
+        datasets = registry()
+        dataset = datasets.get(load_aliases().get(name, name))
+        if dataset is not None:
+            tried.append(data_dir / dataset.primary)
+        tried.extend([data_dir / name, data_dir / f"{name}.csv"])
+    else:
+        tried.append(value)
+    for path in tried:
+        if path.exists():
+            return path
+    attempts = ", ".join(str(p) for p in dict.fromkeys(tried))
+    raise FileNotFoundError(
+        f"Cannot score the unblinded set: no file at {attempts} "
+        "(fetch it with `data fetch test_unblinded`, or pass a dataset name or path to --unblinded)"
+    )
+
+
+def _unblinded_labels(path: Path, blind_df: pl.DataFrame, targets: list[str]) -> dict[str, np.ndarray]:
+    """Read the unblinded test labels and align them to the blind frame's row order.
+
+    Returns one array per target, in the order of `blind_df`'s molecules, with NaN where a label is missing.
+    Raises ValueError if the file is missing molecules or label columns.
+    """
+    frame = pl.read_csv(path, infer_schema_length=None)
+    if "Molecule_Name" not in frame.columns:
+        raise ValueError(f"{path} has no Molecule_Name column, so its labels cannot be matched to the test set")
+    missing_columns = [t for t in targets if t not in frame.columns]
+    if missing_columns:
+        raise ValueError(f"{path} has no column(s) {', '.join(missing_columns)}")
+    aligned = blind_df.select("Molecule_Name").join(
+        frame.select(["Molecule_Name", *targets]), on="Molecule_Name", how="left",
+    )
+    unknown = aligned.filter(pl.all_horizontal(pl.col(t).is_null() for t in targets)).height
+    if unknown == blind_df.height:
+        raise ValueError(f"{path} shares no molecule with the test set being predicted")
+    return {t: aligned[t].cast(pl.Float64).to_numpy() for t in targets}
+
+
 def _write_predictions(path: Path, rows: list[dict[str, object]]) -> None:
     """Write a new CSV, rejecting ambiguous join keys before creating the file."""
     seen = set()
@@ -775,6 +824,19 @@ def main() -> None:
         "(model, input) to results/<model>_<input>_blind_predictions.csv. Models are fit on the train split only.",
     )
     parser.add_argument(
+        "--unblinded",
+        nargs="?",
+        type=Path,
+        const=Path("test_unblinded"),
+        default=None,
+        help="Also score every fitted model on the unblinded test set and print a second results table. "
+        "Predicts the molecules of data/test.csv and compares them with the released labels "
+        "(default: the test_unblinded dataset; fetch it with `data fetch test_unblinded`). "
+        "Takes a dataset name or alias, a filename under --data-dir, or a path, to score against another "
+        "labelled dataset with the same Molecule_Name and target columns. "
+        "Models are fit on the train split only.",
+    )
+    parser.add_argument(
         "--plots",
         nargs="+",
         choices=PLOT_KINDS,
@@ -858,6 +920,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    unblinded_path = None
+    if args.unblinded is not None:
+        try:
+            unblinded_path = _unblinded_source(args.unblinded, args.data_dir)
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+
     if args.folds_out is not None and args.folds_out.exists():
         print(
             f"Cannot write folds CSV to {args.folds_out}: file already exists "
@@ -906,6 +976,19 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                 sys.exit(1)
             print(f"Wrote {len(folds)} fold assignments to {args.folds_out}", file=sys.stderr)
 
+    # The train-test plot compares train labels with predictions on the blind set, so it needs them too,
+    # and --unblinded scores those same predictions against released labels.
+    needs_blind = args.predict_blind or args.unblinded is not None or "train-test" in (args.plots or [])
+    blind_df = pl.read_csv(args.data_dir / "test.csv") if needs_blind else None
+    unblinded_results: list[tuple[str, str, str, dict[str, float]]] = []
+    unblinded_labels: dict[str, np.ndarray] = {}
+    if args.unblinded is not None:
+        try:
+            unblinded_labels = _unblinded_labels(unblinded_path, blind_df, args.targets)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+
     # One tick per fitted model: (seed, fold) pairs per model class, over every target and input set.
     fits_per_target = sum(len(_effective_seeds(cls, seeds)) for cls in model_classes) * (
         1 if folds is None else args.nfolds
@@ -920,8 +1003,6 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     filter_log: list[dict] = []
     # target -> (model, input) -> {val row index: prediction}
     corr_preds: dict[str, dict[tuple[str, str], dict[int, float]]] = {}
-    # The train-test plot compares train labels with predictions on the blind set, so it needs them too.
-    blind_df = pl.read_csv(args.data_dir / "test.csv") if args.predict_blind or "train-test" in (args.plots or []) else None
     # (model, input) -> target -> prediction per blind row
     blind_preds: dict[tuple[str, str], dict[str, np.ndarray]] = {}
     # target -> (model, input, collapsed predictions) for the cross-input ensemble, and per-target row data
@@ -951,6 +1032,19 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                 "y_train": data["y_train"], "y_val": y_val, "pred_val": np.asarray(predictions, dtype=float),
                 "pred_blind": None if out["blind"] is None else np.asarray(out["blind"], dtype=float),
             })
+        if unblinded_labels and out["blind"] is not None:
+            actual = unblinded_labels[target]
+            predicted = np.asarray(out["blind"], dtype=float)
+            scored = np.isfinite(actual) & np.isfinite(predicted)
+            if scored.any():
+                unblinded_results.append((target, name, input_label, {
+                    **_compute_metrics(
+                        pl.Series("actual", actual[scored].tolist()),
+                        pl.Series("prediction", predicted[scored].tolist()),
+                    ),
+                    "n_train": len(data["y_train"]),
+                    "n_val": int(scored.sum()),
+                }))
         if blind_df is not None:
             blind_preds.setdefault((name, input_label), {})[target] = out["blind"]
             if args.predictions_out is not None:
@@ -1082,6 +1176,15 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         + ("  [dim]cv-dedup[/]=on" if dedup else "")
     )
     _print_results(results, args.sort_by)
+    if unblinded_results:
+        unblinded_results.sort(key=_sort_key)
+        console.print(
+            f"\n[dim]unblinded[/]={escape(str(unblinded_path))}"
+            "  [dim](models fit on the train split, scored on the released test labels)[/]"
+        )
+        _print_results(unblinded_results, args.sort_by)
+    elif args.unblinded is not None:
+        print(f"No unblinded scores: no model produced predictions for {unblinded_path}", file=sys.stderr)
     if cv_results:
         console.print(
             f"\n[dim]cross-validation[/]  [dim]cv-split[/]={args.cv_split}  [dim]nfolds[/]={args.nfolds}"
@@ -1105,6 +1208,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
             + (f"  ensemble={method}" if ensembling else "")
         )
         sections = [("Validation", results)]
+        if unblinded_results:
+            sections.append((f"Unblinded ({unblinded_path})", unblinded_results))
         if cv_results:
             sections.append((f"Cross-validation (cv-split={args.cv_split}, nfolds={args.nfolds})", cv_results))
         _write_markdown(args.output_md, header, sections, args.sort_by, corr_preds if args.correlation else None)

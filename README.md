@@ -194,7 +194,16 @@ evaluate-models --input morgan                          # one representation
 evaluate-models --input count_morgan rdkit --split butina --seed 0
 evaluate-models --input all                             # every representation on its own, one table
 evaluate-models --models ridge --input morgan --predictions-out results/validation/morgan.csv
+evaluate-models --input morgan --unblinded                # also score on the released test labels
 ```
+
+`--unblinded` adds a second table: every fitted model predicts the test molecules
+(`data/test.csv`) and is scored against the released labels in `data/test_unblinded.csv`
+(`data fetch test_unblinded`). Models are fit on the train split only, so these are
+held-out numbers; the Train/Val column counts the scored test rows on the right. It takes
+a dataset name or alias, a filename under `--data-dir`, or a path
+(`--unblinded test_unblinded`, `--unblinded data/other.csv`), so any labelled set with the
+same `Molecule_Name` and target columns can be scored.
 
 `--predictions-out <path>` optionally saves one UTF-8 long-format CSV containing
 validation predictions for every selected model, input set, and target (when blind-set

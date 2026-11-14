@@ -12,6 +12,7 @@ from data_tools.datasets import registry
 EXPECTED = [
     "train",
     "test",
+    "test_unblinded",
     "tdi_train",
     "emax_train",
     "single_concentration_train",
