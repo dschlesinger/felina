@@ -8,7 +8,9 @@
 #$ -l gpu_c=9.0               # keep: older GPUs lack kernels for our torch build
 #$ -pe omp 4
 
-module load miniconda
-conda activate cyp
+cd "$SGE_O_WORKDIR"
+
+# The venv lives in the repo, so activate it after the cd above.
+source .venv/bin/activate
 
 foundation-model --generate-cache
