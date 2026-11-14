@@ -10,6 +10,7 @@ chemprop==2.2.3
 mordredcommunity
 xgboost
 tabpfn
+umap-learn
 lightgbm
 rich
 scipy

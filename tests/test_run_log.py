@@ -58,3 +58,19 @@ def test_list_runs_filters(tmp_path, capsys):
     assert "train" in out and "eval" not in out and "2 runs" in out
     main(["--dir", str(tmp_path), "--eval"])
     assert "1 run in" in capsys.readouterr().out
+
+
+
+def test_print_split_routes_terminal_and_log(tmp_path):
+    script = (
+        "import sys; from pathlib import Path; from models.run_log import print_split, run_log\n"
+        "with run_log('eval', {}, runs_dir=Path(sys.argv[1])):\n"
+        "    print('shared', flush=True)\n"
+        "    print_split('short\\u2026\\n', 'full name\\n')\n"
+        "    print('after', flush=True)\n"
+    )
+    env = {**os.environ, "PYTHONPATH": "src"}
+    shown = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, env=env, check=True).stdout
+    assert shown.splitlines() == ["shared", "short\u2026", "after"]
+    body = next(tmp_path.glob("*.log")).read_text().split("# ---\n", 1)[1]
+    assert body.splitlines()[:3] == ["shared", "full name", "after"]

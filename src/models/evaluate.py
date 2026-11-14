@@ -3,9 +3,11 @@
 import argparse
 import csv
 import inspect
+import io
 import re
 import sys
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import polars as pl
@@ -23,10 +25,11 @@ from tqdm import tqdm
 
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from data_tools.load import cv_folds, load_data
-from models import REGISTRY, CYPModel
+from models import REGISTRY, CYPModel, dimred
+from models.TabPFN import WIDE_FEATURES as _TABPFN_WIDE
 from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
-from models.run_log import changed_flags, run_log
+from models.run_log import changed_flags, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
 from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
 
@@ -213,6 +216,35 @@ def _effective_seeds(cls: type[CYPModel], seeds: list[int | None]) -> list[int |
     return seeds if "random_state" in inspect.signature(cls.__init__).parameters else [None]
 
 
+def _fold_views(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    X_blind: np.ndarray | None,
+    folds: np.ndarray | None,
+    reduce: Callable[[np.ndarray, np.ndarray], dimred.Reducer] | None = None,
+) -> list[dict]:
+    """The matrices each fold's models fit on and predict, one dict per fold (one without folds).
+
+    `reduce`, for supervised --dimred, is fit on each fold's training rows and labels only and then
+    applied to every matrix that fold's models see, so a held-out fold's labels never shape its features.
+    """
+    views = []
+    for k in ([None] if folds is None else np.unique(folds).tolist()):
+        fit_rows = np.ones(len(y_train), dtype=bool) if k is None else folds != k
+        view = {
+            "k": k, "y_fit": y_train[fit_rows], "X_fit": X_train[fit_rows], "X_val": X_val, "X_blind": X_blind,
+            "X_holdout": None if k is None else X_train[folds == k],
+        }
+        if reduce is not None:
+            reducer = reduce(view["X_fit"], view["y_fit"])
+            for key in ("X_fit", "X_val", "X_blind", "X_holdout"):
+                if view[key] is not None:
+                    view[key] = reducer.transform(view[key])
+        views.append(view)
+    return views
+
+
 def _fit_members(
     cls: type[CYPModel],
     X_train: np.ndarray,
@@ -222,26 +254,28 @@ def _fit_members(
     folds: np.ndarray | None,
     seeds: list[int | None],
     progress: tqdm | None = None,
+    views: list[dict] | None = None,
 ) -> dict:
     """Fit one model per (seed, fold) and collect what each predicts.
 
     Without folds each seed is fit on all training rows. With folds each model is fit on the
     other folds and also predicts its own held-out fold. A seed of None keeps the model's
     default; models without a `random_state` argument are fit once, since seeds can't differ.
-    `progress` ticks once per fitted model.
+    `progress` ticks once per fitted model. `views` (from _fold_views) replaces the matrices
+    derived from X_train/X_val/X_blind/folds, e.g. to fit on per-fold reduced features.
     """
     seeds = _effective_seeds(cls, seeds)
+    views = views if views is not None else _fold_views(X_train, y_train, X_val, X_blind, folds)
     members: dict = {"val": [], "blind": [], "holdout": {}}
-    for seed in seeds:
-        for k in ([None] if folds is None else np.unique(folds).tolist()):
+    for view in views:
+        for seed in seeds:
             model = cls() if seed is None else cls(random_state=seed)
-            fit_rows = np.ones(len(y_train), dtype=bool) if k is None else folds != k
-            model.fit(X_train[fit_rows], y_train[fit_rows])
-            members["val"].append(model.predict(X_val))
-            if X_blind is not None:
-                members["blind"].append(model.predict(X_blind))
-            if k is not None:
-                members["holdout"].setdefault(k, []).append(model.predict(X_train[folds == k]))
+            model.fit(view["X_fit"], view["y_fit"])
+            members["val"].append(model.predict(view["X_val"]))
+            if view["X_blind"] is not None:
+                members["blind"].append(model.predict(view["X_blind"]))
+            if view["k"] is not None:
+                members["holdout"].setdefault(view["k"], []).append(model.predict(view["X_holdout"]))
             if progress is not None:
                 progress.update()
     return members
@@ -464,10 +498,6 @@ def _short(label: str) -> str:
     return re.sub(r"(chemprop|unimol|atom_jepa_bio|atom_jepa|monroe)\[([^\]]*)\]", lambda m: f"{m.group(1)}[{Path(m.group(2)).name}]", label)
 
 
-def _ellipsize(text: str, width: int) -> str:
-    return text if len(text) <= width else text[: max(width - 1, 1)] + "…"
-
-
 def _aggregate(results: list[tuple[str, str, str, dict[str, float]]]) -> list[tuple[str, str, dict[str, float]]]:
     """Macro-average each metric over isoforms per (model, input); NaNs are skipped per metric."""
     grouped: dict[tuple[str, str], list[dict[str, float]]] = {}
@@ -478,6 +508,20 @@ def _aggregate(results: list[tuple[str, str, str, dict[str, float]]]) -> list[tu
                      for k in _METRICS})
         for (name, inp), ms in grouped.items()
     ]
+
+
+def _ellipsize(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: max(width - 1, 1)] + "…"
+
+
+def _print(renderable, log_renderable=None) -> None:
+    """Print to the terminal as usual, and put `log_renderable` (default: the same thing) in the run log in its place,
+    rendered without a width limit so the log never has cut-off or wrapped columns."""
+    with console.capture() as capture:
+        console.print(renderable)
+    wide = Console(file=io.StringIO(), width=100_000, color_system=None, force_terminal=False, highlight=False)
+    wide.print(renderable if log_renderable is None else log_renderable)
+    print_split(capture.get(), "\n".join(line.rstrip() for line in wide.file.getvalue().splitlines()) + "\n")
 
 
 def _format_cell(metric: str, value: float, best: float) -> str:
@@ -494,8 +538,14 @@ def _format_cell(metric: str, value: float, best: float) -> str:
 def _print_results(results: list[tuple[str, str, str, dict[str, float]]], sort_by: str) -> None:
     """Print one metrics table with a block per isoform and a final macro-average block.
 
-    The best value on each metric within a block is bold green.
+    The best value on each metric within a block is bold green. On the terminal, Model/Input names are
+    shortened with "…" to fit its width; the run log gets the same table with every name in full.
     """
+    _print(_results_table(results, sort_by, console.width), _results_table(results, sort_by, None))
+
+
+def _results_table(results: list[tuple[str, str, str, dict[str, float]]], sort_by: str, fit_width: int | None) -> Table:
+    """The metrics table for _print_results; Model/Input names are shortened to fit `fit_width` (None: never)."""
     by_isoform: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
     for iso, name, inp, m in results:
         by_isoform.setdefault(iso, []).append((name, inp, m))
@@ -524,19 +574,20 @@ def _print_results(results: list[tuple[str, str, str, dict[str, float]]], sort_b
         numeric_width += width + 3
         table.add_column(header, justify="right", no_wrap=True, overflow="ignore", min_width=width)
 
-    # Only the Model/Input strings are shortened (with "…") to fit the terminal; the numeric columns above keep full width.
-    isoform_width = max(len("Isoform"), *(len(iso.replace("_pIC50_direct_inhibition", "")) for iso, _ in blocks))
-    label_budget = max(2 * _MIN_LABEL_WIDTH, console.width - numeric_width - isoform_width - 3 * 3 - 2)
+    # Only the Model/Input strings are shortened (with "…") to fit the width; the numeric columns above keep full width.
     model_width = max(len(r[0]) for _, rows in blocks for r in rows)
     input_width = max(len(_short(r[1])) for _, rows in blocks for r in rows)
-    if model_width + input_width > label_budget:
-        half = label_budget // 2
-        if model_width <= half:
-            input_width = label_budget - model_width
-        elif input_width <= label_budget - half:
-            model_width = label_budget - input_width
-        else:
-            model_width, input_width = label_budget - half, half
+    if fit_width is not None:
+        isoform_width = max(len("Isoform"), *(len(iso.replace("_pIC50_direct_inhibition", "")) for iso, _ in blocks))
+        label_budget = max(2 * _MIN_LABEL_WIDTH, fit_width - numeric_width - isoform_width - 3 * 3 - 2)
+        if model_width + input_width > label_budget:
+            half = label_budget // 2
+            if model_width <= half:
+                input_width = label_budget - model_width
+            elif input_width <= label_budget - half:
+                model_width = label_budget - input_width
+            else:
+                model_width, input_width = label_budget - half, half
 
     for i, (iso, rows) in enumerate(blocks):
         best = {}
@@ -553,7 +604,7 @@ def _print_results(results: list[tuple[str, str, str, dict[str, float]]], sort_b
                 *(_format_cell(metric, m[metric], best[metric]) for metric in _METRICS),
                 end_section=j == len(rows) - 1 and i < len(blocks) - 1,
             )
-    console.print(table)
+    return table
 
 
 def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
@@ -580,7 +631,7 @@ def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
     rules = [f"R² >= {_CV_FILTER_R2}" if "r2" in filters else "", f"RAE ratio <= {_CV_FILTER_RAE}" if "RAE" in filters else "",
              f"dedup Pearson r > {_DEDUP_CORR} (same cluster = averaged)" if dedup else ""]
     console.print(f"\n[dim]ensemble filters[/]  {escape('; '.join(r for r in rules if r))}")
-    console.print(table)
+    _print(table)
 
 
 def _print_stacks(reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]]) -> None:
@@ -602,7 +653,7 @@ def _print_stacks(reports: list[tuple[str, str, str, list[str], np.ndarray, floa
         fitted = ", ".join(f"{k}={v:g}" for k, v in {"intercept": intercept, **params}.items())
         notes.append(f"{iso}, {_short(input_label)}: {fitted}")
     console.print(f"\n[dim]stacking weights[/]  [dim]method[/]={reports[0][2]}")
-    console.print(table)
+    _print(table)
     for note in notes:
         console.print(f"[dim]{escape(note)}[/]")
 
@@ -694,7 +745,7 @@ def _print_correlations(target: str, preds: dict[tuple[str, str], dict[int, floa
             cells.append(f"[{color}]{r:.2f}[/]")
         table.add_row(escape(f"{i}  {a[0]} [{_short(a[1])}]"), *cells)
     console.print()
-    console.print(table)
+    _print(table)
 
 
 def main() -> None:
@@ -811,6 +862,15 @@ def main() -> None:
         help="Also write full-name result tables (and the correlation matrices if --correlation is set) to this "
         "markdown file; unlike the console tables, names are never truncated to the terminal width",
     )
+    parser.add_argument(
+        "--dimred",
+        default=None,
+        metavar="METHOD[N]",
+        help="Reduce each input set to N dimensions between featurization and the models: pca[N] (torch SVD, GPU "
+        "when available), umap[N] (CPU) or pls[N] (supervised: fit per target, and per fold under --nfolds, on "
+        "training rows only). pca and umap are fit on the whole train split, so under --nfolds they have seen the "
+        "held-out folds' features (not labels). Fits are cached under <cache-dir>/dimred. E.g. --dimred pca[256]",
+    )
     parser.add_argument("--cache-dir", default=FEATURE_DIR, help="Directory for cached feature matrices")
     parser.add_argument("--sort-by", default="MAE", choices=_METRICS, help="Metric to sort results by")
     parser.add_argument(
@@ -900,6 +960,13 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     filters = [] if args.nfolds is None or args.cv_filter == ["none"] else list(dict.fromkeys(args.cv_filter or ["r2", "RAE"]))
     dedup = args.nfolds is not None and not args.no_cv_deduplication
 
+    reduction = None
+    if args.dimred is not None:
+        try:
+            reduction = dimred.parse_spec(args.dimred)
+        except ValueError as exc:
+            parser.error(str(exc))
+
     if not 0.0 < args.val_split < 1.0:
         print(f"--val-split must be in (0, 1), got {args.val_split}", file=sys.stderr)
         sys.exit(1)
@@ -947,6 +1014,13 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         print("--cv-filter and deduplication only affect ensemble rows; with one model and one input they do nothing", file=sys.stderr)
 
     cache_dir = Path(args.cache_dir)
+    dimred_dir = cache_dir / "dimred"
+    if reduction is not None and not reduction.supervised and args.nfolds is not None:
+        print(
+            f"--dimred {reduction} is fit on the whole train split, so the out-of-fold scores come from features "
+            "that saw the held-out folds (no labels); expect them to be slightly optimistic",
+            file=sys.stderr,
+        )
 
     train_df, val_df = load_data(
         split_type=args.split,
@@ -1065,10 +1139,31 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         val_features = zero_nonfinite_features(
             featurize(val_df, input_names, cache_dir), f"val/{input_label}", val_df["SMILES"].to_list(),
         )
+        blind_features = None
         if blind_df is not None:
             blind_features = zero_nonfinite_features(
                 featurize(blind_df, input_names, cache_dir), f"blind/{input_label}", blind_df["SMILES"].to_list(),
             )
+        if reduction is None and train_features.shape[1] > _TABPFN_WIDE and any(c.name == "tabpfn" for c in model_classes):
+            print(
+                f"WARNING: tabpfn gets {train_features.shape[1]} features from {input_label} and no --dimred is set; "
+                f"it no longer reduces them itself (it used PCA to {_TABPFN_WIDE}). "
+                f"Pass --dimred pca[{_TABPFN_WIDE}] to match earlier runs",
+                file=sys.stderr,
+            )
+        if reduction is not None:
+            input_label = f"{input_label} :: {reduction}"
+            if not reduction.supervised:
+                # Unsupervised: fit once on every train-split row, shared by all isoforms.
+                reducer = dimred.fit(reduction, train_features, cache_dir=dimred_dir)
+                train_features = reducer.transform(train_features)
+                val_features = reducer.transform(val_features)
+                if blind_features is not None:
+                    blind_features = reducer.transform(blind_features)
+        reduce = (
+            (lambda X, y: dimred.fit(reduction, X, y, cache_dir=dimred_dir))
+            if reduction is not None and reduction.supervised else None
+        )
         for target in args.targets:
             label = f"{target}, {input_label}"
             X_train, y_train, train_mask = drop_nan_rows(
@@ -1089,9 +1184,11 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                 np.array_equal(prior["train_mask"], train_mask) and np.array_equal(prior["val_mask"], val_mask)
             ):
                 misaligned.add(target)
+            # Reduced once per target and fold, then shared by every model class and seed.
+            views = _fold_views(X_train, y_train, X_val, blind_features, fold_ids, reduce)
             collapsed = [
                 (cls.name, _collapse([_fit_members(
-                    cls, X_train, y_train, X_val, blind_features if blind_df is not None else None, fold_ids, seeds, progress,
+                    cls, X_train, y_train, X_val, blind_features, fold_ids, seeds, progress, views=views,
                 )], member_method))
                 for cls in model_classes
             ]
@@ -1170,6 +1267,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         f"[dim]input[/]="
         + escape(_short(" | ".join(" + ".join(g) for g in args.input)))
         + f"  [dim]split[/]={args.split}  [dim]seed[/]={args.seed}"
+        + (f"  [dim]dimred[/]={escape(str(reduction))}" if reduction else "")
         + (f"  [dim]nseeds[/]={args.nseeds}" if args.nseeds > 1 else "")
         + (f"  [dim]ensemble[/]={method}" if ensembling else "")
         + (f"  [dim]cv-filter[/]={'+'.join(filters)}" if filters else "")
@@ -1204,6 +1302,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.output_md:
         header = (
             f"input={_short(' | '.join(' + '.join(g) for g in args.input))}  split={args.split}  seed={args.seed}"
+            + (f"  dimred={reduction}" if reduction else "")
             + (f"  nseeds={args.nseeds}" if args.nseeds > 1 else "")
             + (f"  ensemble={method}" if ensembling else "")
         )

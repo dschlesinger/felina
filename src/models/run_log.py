@@ -105,6 +105,30 @@ class RunLog:
             self._handle.flush()
 
 
+# Markers written into stdout to route what follows: to the terminal only, to the log only, or (default) to both.
+# The tee strips them; they are private OSC sequences, which _ANSI would also drop from the log.
+_MARKER_PREFIX = b"\x1b]run-log;"
+_TERMINAL_ONLY, _LOG_ONLY, _BOTH = (_MARKER_PREFIX + k + b"\x07" for k in (b"terminal", b"log", b"both"))
+_MARKER = re.compile(re.escape(_MARKER_PREFIX) + rb"(?:terminal|log|both)\x07")
+_MARKER_LEN = max(len(m) for m in (_TERMINAL_ONLY, _LOG_ONLY, _BOTH))
+_teeing = False  # True while run_log is copying stdout into a log
+
+
+def print_split(terminal: str, log: str) -> None:
+    """Show `terminal` on stdout and, in a run log, record `log` in its place instead.
+
+    Outside run_log (no log is being written) only `terminal` is printed.
+    """
+    if not _teeing:
+        sys.stdout.write(terminal)
+        sys.stdout.flush()
+        return
+    sys.stdout.write(
+        _TERMINAL_ONLY.decode() + terminal + _LOG_ONLY.decode() + log + _BOTH.decode()
+    )
+    sys.stdout.flush()
+
+
 def _clean_line(line: str) -> str:
     """Drop colour/image escape codes and keep only the last state of a carriage-return progress bar."""
     return _ANSI.sub("", line).rstrip("\r").rsplit("\r", 1)[-1]
@@ -135,6 +159,15 @@ class _Tee:
     def _pump(self) -> None:
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         pending = ""
+        held = b""  # a chunk's tail that may be the start of a mode marker split across reads
+        mode = _BOTH
+
+        def log(data: bytes) -> None:
+            nonlocal pending
+            *lines, pending = (pending + decoder.decode(data)).split("\n")
+            for line in lines:
+                self.log.line(_clean_line(line))
+
         while True:
             try:
                 chunk = os.read(self.read_fd, 65536)
@@ -142,14 +175,26 @@ class _Tee:
                 break
             if not chunk:
                 break
-            self._show(chunk)
-            *lines, pending = (pending + decoder.decode(chunk)).split("\n")
-            for line in lines:
-                self.log.line(_clean_line(line))
-        pending += decoder.decode(b"", final=True)
+            data, held = held + chunk, b""
+            cut = data.rfind(_MARKER_PREFIX[:1], max(0, len(data) - _MARKER_LEN + 1))
+            if cut != -1 and _MARKER_PREFIX.startswith(data[cut:cut + len(_MARKER_PREFIX)]) and not _MARKER.match(data, cut):
+                data, held = data[:cut], data[cut:]
+            start = 0
+            for match in _MARKER.finditer(data):
+                self._route(data[start:match.start()], mode, log)
+                mode, start = match.group(0), match.end()
+            self._route(data[start:], mode, log)
+        self._route(held, mode, log)
+        log(decoder.decode(b"", final=True).encode())
         if pending:
             self.log.line(_clean_line(pending))
         os.close(self.read_fd)
+
+    def _route(self, data: bytes, mode: bytes, log) -> None:
+        if data and mode != _LOG_ONLY:
+            self._show(data)
+        if data and mode != _TERMINAL_ONLY:
+            log(data)
 
     def close(self) -> None:
         os.dup2(self.saved, self.fd)  # restores the original, dropping this process's copy of the pipe
@@ -179,7 +224,9 @@ def run_log(kind: str, flags: Mapping[str, object], header: Mapping[str, str] | 
     log.line(_END_OF_HEADER)
     sys.stdout.flush()
     sys.stderr.flush()
+    global _teeing
     tees = [_Tee(1, log), _Tee(2, log)]
+    _teeing = True
     status = "ok"
     try:
         yield log
@@ -197,6 +244,7 @@ def run_log(kind: str, flags: Mapping[str, object], header: Mapping[str, str] | 
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
+        _teeing = False
         for tee in tees:
             tee.close()
         if status == "ok" and log.code not in (None, 0):
