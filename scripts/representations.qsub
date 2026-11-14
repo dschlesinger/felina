@@ -1,0 +1,40 @@
+#!/bin/bash -l
+#$ -P buaisociety
+#$ -N representations
+#$ -j y
+#$ -o representations.qlog
+#$ -l h_rt=12:00:00           # raise for the xtb blocks: qsub -l h_rt=48:00:00 scripts/representations.qsub ...
+#$ -l gpus=1
+#$ -l gpu_c=9.0               # keep: older GPUs lack kernels for our torch build
+#$ -pe omp 4
+
+module load miniconda
+conda activate cyp
+
+cd "$SGE_O_WORKDIR"
+
+python -c "import omegaconf;from unimol_tools import UniMolRepr; print('Unimol Environment Successfully Found')"
+
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, torch.cuda.get_arch_list())"
+
+# The cache is keyed by SMILES over train.csv + test.csv, so both must be present.
+# Data is gitignored; fetch it once on the cluster (skips files already present):
+#   download-data
+if [ ! -f data/train.csv ] || [ ! -f data/test.csv ]; then
+    echo "Missing data/train.csv or data/test.csv. Run download-data first." >&2
+    exit 1
+fi
+
+# Extra args pass through to the representations CLI. Name what to embed: only molecules missing
+# from the cache are computed, so re-running after new data is cheap.
+#   qsub scripts/representations.qsub --embed chemeleon monroe
+#   qsub scripts/representations.qsub --embed unimol[/path/to/model_0.pth] atom_jepa[/path/encoder.pt]
+#   qsub scripts/representations.qsub --embed all          # includes the slow xtb blocks; give it 48h
+#   qsub scripts/representations.qsub --check              # what is cached and how complete it is
+if [ "$#" -eq 0 ]; then
+    echo "Pass arguments, e.g. --embed chemeleon monroe (or --embed all, --check)." >&2
+    exit 1
+fi
+
+representations "$@"
