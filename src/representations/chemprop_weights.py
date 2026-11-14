@@ -29,17 +29,22 @@ def parse_spec(name: str) -> Path | None:
     return Path(resolve_alias(match.group(1))).expanduser() if match else None
 
 
+def cache_prefix(name: str) -> str:
+    """The cache stem without the weights' size and mtime, derived from the path alone (no filesystem access)."""
+    path = parse_spec(name)
+    if path is None:
+        raise ValueError(f"not a chemprop[...] input: {name!r}")
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(path.resolve())).strip("_")[-80:]
+    return f"chemprop_{slug}"
+
+
 def cache_name(name: str) -> str:
     """Filesystem-safe cache stem for a spec, so the cache is keyed by the weights, not just 'chemprop'.
 
     Includes size and mtime: retraining to the same path must not reuse stale embeddings.
     """
-    path = parse_spec(name)
-    if path is None:
-        raise ValueError(f"not a chemprop[...] input: {name!r}")
-    stat = path.stat()
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(path.resolve())).strip("_")[-80:]
-    return f"chemprop_{slug}_{stat.st_size}_{int(stat.st_mtime)}"
+    stat = parse_spec(name).stat()
+    return f"{cache_prefix(name)}_{stat.st_size}_{int(stat.st_mtime)}"
 
 
 def _load_model(path: Path):

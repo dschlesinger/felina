@@ -1,6 +1,7 @@
 """CLI for inspecting and filling the molecular-representation feature cache."""
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from rich.table import Table
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from data_tools.load import load_data, load_test, load_train
 from representations.embedding_metrics import evaluate_embedding, evaluate_shift, fingerprint_shift
-from representations.foundation_alias import ALIAS_FILE, set_alias
+from representations.foundation_alias import ALIAS_FILE, load_aliases, set_alias
 from data_tools.paths import DATA_DIR, FEATURE_DIR
 
 console = Console()
@@ -36,10 +37,30 @@ def _size(num_bytes: int) -> str:
     raise AssertionError
 
 
+# Cache stems are "{kind}_{path slug}_{size}_{mtime}", so an alias's path identifies its stems without the weights.
+_SPEC_KINDS = ("chemprop", "unimol", "atom_jepa_bio", "atom_jepa", "monroe")
+
+
+def _aliases_by_stem(stems: list[str]) -> dict[str, str]:
+    """Map each cached stem to the foundation-path alias naming the weights it came from, where there is one."""
+    found: dict[str, str] = {}
+    for alias, path in load_aliases().items():
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", str(Path(path).expanduser().resolve())).strip("_")[-80:]
+        prefixes = tuple(f"{kind}_{slug}_" for kind in _SPEC_KINDS)
+        for stem in stems:
+            if stem.startswith(prefixes):
+                found[stem] = alias
+    return found
+
+
 def _check(cache_dir: Path, smiles: set[str] | None) -> None:
     """Print one row per cached representation, plus registered ones that have no cache yet."""
+    npys = sorted(cache_dir.glob("*.npy")) if cache_dir.exists() else []
+    aliases = _aliases_by_stem([npy.stem for npy in npys])
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", pad_edge=False)
     table.add_column("Representation", style="bold", overflow="fold")
+    if aliases:
+        table.add_column("Alias", overflow="fold")
     table.add_column("Molecules", justify="right")
     table.add_column("Dim", justify="right")
     table.add_column("Size", justify="right")
@@ -48,10 +69,13 @@ def _check(cache_dir: Path, smiles: set[str] | None) -> None:
         table.add_column("Covers", justify="right")
 
     cached: set[str] = set()
-    for npy in sorted(cache_dir.glob("*.npy")) if cache_dir.exists() else []:
+    def _alias_cell(stem: str) -> list[str]:
+        return [escape(aliases.get(stem, ""))] if aliases else []
+
+    for npy in npys:
         idx = npy.with_suffix(".idx")
         if not idx.exists():
-            table.add_row(escape(npy.stem), "[red]no .idx[/]", "", _size(npy.stat().st_size), "")
+            table.add_row(escape(npy.stem), *_alias_cell(npy.stem), "[red]no .idx[/]", "", _size(npy.stat().st_size), "")
             continue
         cached.add(npy.stem)
         indexed = idx.read_text().splitlines()
@@ -59,6 +83,7 @@ def _check(cache_dir: Path, smiles: set[str] | None) -> None:
         stale = "[red]mismatch[/]" if shape[0] != len(indexed) else str(shape[0])
         row = [
             escape(npy.stem),
+            *_alias_cell(npy.stem),
             stale,
             str(shape[1]) if len(shape) > 1 else "?",
             _size(npy.stat().st_size + idx.stat().st_size),
@@ -72,7 +97,7 @@ def _check(cache_dir: Path, smiles: set[str] | None) -> None:
 
     for name in INPUT_REGISTRY:
         if name not in cached:
-            table.add_row(f"[dim]{name}[/]", "[dim]not cached[/]", "", "", "", *([""] if smiles is not None else []))
+            table.add_row(f"[dim]{name}[/]", *([""] if aliases else []), "[dim]not cached[/]", "", "", "", *([""] if smiles is not None else []))
     console.print(f"[dim]cache dir:[/] {cache_dir}  [dim]Covers = cached molecules out of {len(smiles)} train+test[/]" if smiles is not None else f"[dim]cache dir:[/] {cache_dir}")
     console.print(table)
 

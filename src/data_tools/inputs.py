@@ -8,9 +8,10 @@ import polars as pl
 
 from representations.atom_jepa import AtomJEPA, AtomJEPABio
 from representations.atom_jepa import cache_name as atom_jepa_cache_name
+from representations.atom_jepa import cache_prefix as atom_jepa_cache_prefix
 from representations.atom_jepa import parse_spec as parse_atom_jepa_spec
 from representations.chemeleon import CheMeleon
-from representations.chemprop_weights import ChempropWeights, cache_name, parse_spec
+from representations.chemprop_weights import ChempropWeights, cache_name, cache_prefix, parse_spec
 from representations.rdkit_descriptors import RDKitDescriptors
 from representations.morgan import CountMorganFingerprint, MorganFingerprint
 from representations.maccs import MACCS
@@ -24,9 +25,11 @@ from representations.cyp_pharmacophore import (
 from representations.shape import ShapeDescriptors
 from representations.unimol import UniMol
 from representations.unimol import cache_name as unimol_cache_name
+from representations.unimol import cache_prefix as unimol_cache_prefix
 from representations.unimol import parse_spec as parse_unimol_spec
 from representations.monroe import Monroe
 from representations.monroe import cache_name as monroe_cache_name
+from representations.monroe import cache_prefix as monroe_cache_prefix
 from representations.monroe import parse_spec as parse_monroe_spec
 from representations.cyp_mech import CYPMechanisticBlock
 from representations.cyp_xtb import XTBElectronic, XTBSolvation
@@ -148,6 +151,33 @@ INPUT_REGISTRY: dict[str, Callable[[pl.DataFrame], np.ndarray]] = {
 }
 
 
+def _stem_for_spec(input_name: str, prefix: str, exact: Callable[[str], str], cache_dir: Path) -> str:
+    """The cache stem for a weights spec, falling back to an embedding already made from those weights.
+
+    The exact stem ends in the weights' size and mtime, so retraining to the same path re-embeds rather than
+    reusing stale rows. When the weights themselves are gone the embedding outlives them and is all this needs,
+    as long as exactly one run of that path was embedded: several is ambiguous without the weights to compare
+    against.
+    """
+    try:
+        return exact(input_name)
+    except OSError:
+        pass  # the weights are missing; fall back to what was embedded from them
+    cached = sorted({p.stem for p in cache_dir.glob(f"{prefix}_*.idx") if (cache_dir / f"{p.stem}.npy").is_file()})
+    if len(cached) == 1:
+        print(f"[{input_name}] weights missing; using the cached embedding {cached[0]}")
+        return cached[0]
+    raise FileNotFoundError(
+        f"Input {input_name!r}: the weights are missing and "
+        + (
+            f"{len(cached)} cached embeddings came from that path ({', '.join(cached)}), so which one it means "
+            "is ambiguous; put the weights back to pick"
+            if cached
+            else f"nothing in {cache_dir} was embedded from them"
+        )
+    )
+
+
 def is_known_input(name: str) -> bool:
     """True for a registered input or a `chemprop[/path]`, `unimol[/path/to/model_0.pth]`, `atom_jepa[/path/encoder.pt]` or `monroe[/path/to/checkpoint]` spec."""
     return (
@@ -177,13 +207,13 @@ def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.nda
     atom_jepa_spec = parse_atom_jepa_spec(input_name)
     monroe_checkpoint = parse_monroe_spec(input_name)
     if weights is not None:
-        stem = cache_name(input_name)
+        stem = _stem_for_spec(input_name, cache_prefix(input_name), cache_name, cache_dir)
     elif unimol_weights is not None:
-        stem = unimol_cache_name(input_name)
+        stem = _stem_for_spec(input_name, unimol_cache_prefix(input_name), unimol_cache_name, cache_dir)
     elif atom_jepa_spec is not None:
-        stem = atom_jepa_cache_name(input_name)
+        stem = _stem_for_spec(input_name, atom_jepa_cache_prefix(input_name), atom_jepa_cache_name, cache_dir)
     elif monroe_checkpoint is not None:
-        stem = monroe_cache_name(input_name)
+        stem = _stem_for_spec(input_name, monroe_cache_prefix(input_name), monroe_cache_name, cache_dir)
     else:
         stem = input_name
     npy_path = cache_dir / f"{stem}.npy"
@@ -208,6 +238,12 @@ def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.nda
             new_features = encoder(path=path).transform(missing_df["SMILES"])
         elif monroe_checkpoint is not None:
             new_features = Monroe(monroe_checkpoint).transform(missing_df["SMILES"])
+        elif input_name not in INPUT_REGISTRY:
+            # A spec resolved to an embedding whose weights are gone: those rows are all there is.
+            raise ValueError(
+                f"Input {input_name!r} fell back to the cache {npy_path}, and {len(missing)} of "
+                f"{len(smiles_req)} requested molecules are not in it. The weights are needed to embed the rest."
+            )
         else:
             new_features = INPUT_REGISTRY[input_name](missing_df)
         full = np.vstack([np.load(str(npy_path)), new_features]) if npy_path.exists() else new_features

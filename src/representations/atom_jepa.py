@@ -34,18 +34,23 @@ def parse_spec(name: str) -> tuple[str, Path] | None:
     return (match.group(1), Path(resolve_alias(match.group(2))).expanduser()) if match else None
 
 
+def cache_prefix(name: str) -> str:
+    """The cache stem without the weights' size and mtime, derived from the path alone (no filesystem access)."""
+    spec = parse_spec(name)
+    if spec is None:
+        raise ValueError(f"not an atom_jepa[...] input: {name!r}")
+    kind, path = spec
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(path.resolve())).strip("_")[-80:]
+    return f"{kind}_{slug}"
+
+
 def cache_name(name: str) -> str:
     """Filesystem-safe cache stem for a spec, so the cache is keyed by the weights, not just 'atom_jepa'.
 
     Includes size and mtime: retraining to the same path must not reuse stale embeddings.
     """
-    spec = parse_spec(name)
-    if spec is None:
-        raise ValueError(f"not an atom_jepa[...] input: {name!r}")
-    kind, path = spec
-    stat = path.stat()
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(path.resolve())).strip("_")[-80:]
-    return f"{kind}_{slug}_{stat.st_size}_{int(stat.st_mtime)}"
+    stat = parse_spec(name)[1].stat()
+    return f"{cache_prefix(name)}_{stat.st_size}_{int(stat.st_mtime)}"
 
 
 class AtomJEPA(Representation):

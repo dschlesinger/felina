@@ -357,6 +357,12 @@ auxiliary-trained checkpoints (`chemprop[...]`, `unimol[...]`, `atom_jepa[...]`,
 Checkpoints must not have been trained on held-out labels. Record their resolved
 paths and hashes, keep weights immutable, and use fresh caches when changing them.
 
+Embeddings outlive the checkpoint that made them: a cache stem works as an input name on
+its own, so `--input chemprop_uaisociety_..._best_pt_1365481_1792620908` reuses those rows
+with the weights gone. `representations --check` lists every stem, with the alias of the
+weights it came from. Molecules outside such a cache cannot be embedded, so a run that
+needs new ones asks for the weights back.
+
 ## Acknowledgements
 
 `cyp_mech_v1` (`src/representations/cyp_mech.py`) is ported from the open-code
