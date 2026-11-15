@@ -54,3 +54,28 @@ def test_write_affine_csv(tmp_path):
     assert lines[1] == "CYP3A4_pIC50_direct_inhibition,ridge,maccs,scaffold,42,1868,0.75,1.0"
     with pytest.raises(OSError, match="already exists|Cannot write"):
         _write_affine(path, rows)
+
+
+def test_member_predictions_round_trip(tmp_path):
+    """The saved member rows are enough to refit the run's affine map without refitting the models."""
+    from models.evaluate import _MEMBER_COLUMNS, _write_members
+
+    rng = np.random.default_rng(5)
+    y = rng.normal(size=40)
+    pred = 0.5 * y + 1.0 + 0.1 * rng.normal(size=40)
+    folds = np.arange(40) % 4
+    rows = [
+        dict(zip(_MEMBER_COLUMNS, (f"C{i}", "CYP3A4_pIC50_direct_inhibition", "ridge", "maccs", "", int(folds[i]),
+                                   "holdout", float(y[i]), float(pred[i]))))
+        for i in range(40)
+    ]
+    path = tmp_path / "member_predictions.csv"
+    _write_members(path, rows)
+
+    import csv as _csv
+
+    with path.open(encoding="utf-8") as stream:
+        back = [r for r in _csv.DictReader(stream) if r["role"] == "holdout"]
+    assert len(back) == 40
+    got = fit_affine(np.array([float(r["y_pred"]) for r in back]), np.array([float(r["y_true"]) for r in back]))
+    assert got == pytest.approx(fit_affine(pred, y))

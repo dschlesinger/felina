@@ -141,6 +141,22 @@ def _write_predictions(path: Path, rows: list[dict[str, object]]) -> None:
 
 _AFFINE_COLUMNS = ["isoform", "model", "input", "split", "seed", "n_oof", "slope", "intercept"]
 
+# One row per molecule per fitted model: role says whether that model was fitted on the molecule ("fit")
+# or held out of it ("holdout"). The holdout rows are what a post-hoc affine recalibration is fitted on.
+_MEMBER_COLUMNS = ["smiles", "isoform", "model", "input", "seed", "fold", "role", "y_true", "y_pred"]
+
+
+def _write_members(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write every fitted model's predictions on its own fit and held-out rows to a new CSV."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=_MEMBER_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+    except OSError as exc:
+        raise OSError(f"Cannot write member predictions CSV to {path}: {exc}") from exc
+
 
 def _write_affine(path: Path, rows: list[dict[str, object]]) -> None:
     """Write the fitted affine maps to a new CSV, refusing to overwrite."""
@@ -169,7 +185,10 @@ def _write_folds(path: Path, train_df: pl.DataFrame, folds: np.ndarray) -> None:
 # An output flag given with no value writes the run folder's default name for that output.
 IN_RUN_DIR = Path("@run")
 # Output paths say where a run's files went, not what the experiment was, so they stay out of the folder name.
-_UNNAMED_FLAGS = frozenset({"predictions_out", "folds_out", "output_md", "plots_dir", "affine_out", "cache_dir", "data_dir"})
+_UNNAMED_FLAGS = frozenset({
+    "predictions_out", "folds_out", "output_md", "plots_dir", "affine_out", "member_predictions_out",
+    "cache_dir", "data_dir",
+})
 
 
 def _resolve_out(value: Path | None, run_dir: Path, name: str) -> Path | None:
@@ -262,8 +281,8 @@ def _fold_views(
     for k in ([None] if folds is None else np.unique(folds).tolist()):
         fit_rows = np.ones(len(y_train), dtype=bool) if k is None else folds != k
         view = {
-            "k": k, "y_fit": y_train[fit_rows], "X_fit": X_train[fit_rows], "X_val": X_val, "X_blind": X_blind,
-            "X_holdout": None if k is None else X_train[folds == k],
+            "k": k, "fit_rows": fit_rows, "y_fit": y_train[fit_rows], "X_fit": X_train[fit_rows],
+            "X_val": X_val, "X_blind": X_blind, "X_holdout": None if k is None else X_train[folds == k],
         }
         if reduce is not None:
             reducer = reduce(view["X_fit"], view["y_fit"])
@@ -284,6 +303,7 @@ def _fit_members(
     seeds: list[int | None],
     progress: tqdm | None = None,
     views: list[dict] | None = None,
+    collect: Callable[[int | None, dict, np.ndarray, np.ndarray | None], None] | None = None,
 ) -> dict:
     """Fit one model per (seed, fold) and collect what each predicts.
 
@@ -292,6 +312,10 @@ def _fit_members(
     default; models without a `random_state` argument are fit once, since seeds can't differ.
     `progress` ticks once per fitted model. `views` (from _fold_views) replaces the matrices
     derived from X_train/X_val/X_blind/folds, e.g. to fit on per-fold reduced features.
+
+    `collect(seed, view, fit_predictions, holdout_predictions)` is called once per fitted model with what it
+    predicts on the rows it was fitted on and on the fold it was held out of. Predicting on the fit rows is
+    extra inference, so it only happens when a collector asks for it.
     """
     seeds = _effective_seeds(cls, seeds)
     views = views if views is not None else _fold_views(X_train, y_train, X_val, X_blind, folds)
@@ -303,8 +327,12 @@ def _fit_members(
             members["val"].append(model.predict(view["X_val"]))
             if view["X_blind"] is not None:
                 members["blind"].append(model.predict(view["X_blind"]))
+            holdout = None
             if view["k"] is not None:
-                members["holdout"].setdefault(view["k"], []).append(model.predict(view["X_holdout"]))
+                holdout = model.predict(view["X_holdout"])
+                members["holdout"].setdefault(view["k"], []).append(holdout)
+            if collect is not None:
+                collect(seed, view, model.predict(view["X_fit"]), holdout)
             if progress is not None:
                 progress.update()
     return members
@@ -816,6 +844,19 @@ def main() -> None:
         "metrics use a map fitted on the other folds only. Requires --nfolds",
     )
     parser.add_argument(
+        "--no-member-predictions",
+        action="store_true",
+        help="Don't write member_predictions.csv. By default, with --nfolds, every fitted model's predictions on "
+        "the rows it was fitted on (role=fit) and on the fold it was held out of (role=holdout) are saved to the "
+        "run folder, per model, input, isoform, seed and fold, so an affine recalibration (or any other "
+        "post-processing) can be fitted afterwards without refitting. Predicting on the fit rows is extra "
+        "inference, which this flag skips",
+    )
+    parser.add_argument(
+        "--member-predictions-out", type=Path, default=None,
+        help="Write the member predictions somewhere other than member_predictions.csv in the run folder",
+    )
+    parser.add_argument(
         "--affine-out",
         type=Path,
         help="Where to write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept). "
@@ -984,6 +1025,9 @@ def main() -> None:
         args.output_md = _resolve_out(args.output_md or IN_RUN_DIR, log.dir, "results.md")
         if args.affine_recalibration:
             args.affine_out = _resolve_out(args.affine_out or IN_RUN_DIR, log.dir, "affine.csv")
+        args.member_predictions_out = _resolve_out(
+            args.member_predictions_out or IN_RUN_DIR, log.dir, "member_predictions.csv",
+        )
         args.plots_dir = args.plots_dir or log.dir / "plots"
         _run(parser, args, log.dir)
 
@@ -1017,6 +1061,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         parser.error("--affine-out requires --affine-recalibration (there are no fitted maps to write otherwise)")
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
+    # Per-member predictions need folds: without them nothing is ever held out to recalibrate on.
+    save_members = args.nfolds is not None and not args.no_member_predictions
     # Recalibrating always draws its own plot; asking for the plot fits the map without applying it.
     plot_kinds = list(dict.fromkeys((args.plots or []) + (["affine"] if args.affine_recalibration else [])))
     fit_affine_maps = args.affine_recalibration or "affine" in plot_kinds
@@ -1079,6 +1125,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     if args.folds_out is not None and args.folds_out.exists():
         print(
             f"Cannot write folds CSV to {args.folds_out}: file already exists "
+            "(checked before training; choose a new path or delete it)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if save_members and args.member_predictions_out.exists():
+        print(
+            f"Cannot write member predictions CSV to {args.member_predictions_out}: file already exists "
             "(checked before training; choose a new path or delete it)",
             file=sys.stderr,
         )
@@ -1169,6 +1223,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     filter_log: list[dict] = []
     # one _AFFINE_COLUMNS row per recalibrated prediction set
     affine_log: list[dict[str, object]] = []
+    member_rows: list[dict[str, object]] = []
     # target -> (model, input) -> {val row index: prediction}
     corr_preds: dict[str, dict[tuple[str, str], dict[int, float]]] = {}
     # (model, input) -> target -> prediction per blind row
@@ -1288,6 +1343,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                 )
                 val_index = np.flatnonzero(val_mask)
                 val_smiles = val_df["SMILES"].to_numpy()[val_mask] if args.predictions_out is not None else None
+                train_smiles = train_df["SMILES"].to_numpy()[train_mask]
                 fold_ids = None if folds is None else folds[train_mask]
                 data = {
                     "y_train": y_train, "y_val": y_val, "fold_ids": fold_ids, "train_mask": train_mask,
@@ -1300,9 +1356,28 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                     misaligned.add(target)
                 # Reduced once per target and fold, then shared by every model class and seed.
                 views = _fold_views(X_train, y_train, X_val, blind_features, fold_ids, reduce)
+
+                def collector(model_name: str):
+                    """Queue one CSV row per molecule for a fitted model, on its fit rows and its held-out fold."""
+                    def collect(seed, view, fit_predictions, holdout_predictions) -> None:
+                        groups = [("fit", np.flatnonzero(view["fit_rows"]), fit_predictions)]
+                        if holdout_predictions is not None:
+                            groups.append(("holdout", np.flatnonzero(~view["fit_rows"]), holdout_predictions))
+                        for role, rows_index, predicted in groups:
+                            member_rows.extend(
+                                dict(zip(_MEMBER_COLUMNS, (
+                                    train_smiles[i], target, model_name, input_label,
+                                    "" if seed is None else seed, view["k"], role,
+                                    float(y_train[i]), float(pred),
+                                )))
+                                for i, pred in zip(rows_index, predicted)
+                            )
+                    return collect
+
                 collapsed = [
                     (cls.name, _collapse([_fit_members(
                         cls, X_train, y_train, X_val, blind_features, fold_ids, seeds, progress, views=views,
+                        collect=collector(cls.name) if save_members else None,
                     )], member_method))
                     for cls in model_classes
                 ]
@@ -1368,6 +1443,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                 print(str(exc), file=sys.stderr)
                 sys.exit(1)
             print(f"Wrote {len(blind_rows)} blind predictions to {_blind_path(args.predictions_out)}", file=sys.stderr)
+
+    if member_rows:
+        try:
+            _write_members(args.member_predictions_out, member_rows)
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Wrote {len(member_rows)} member predictions to {args.member_predictions_out}", file=sys.stderr)
 
     if affine_log:
         try:
