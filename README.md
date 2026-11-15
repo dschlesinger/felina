@@ -164,14 +164,14 @@ results/runs/0095__eval__input=maccs_models=ridge_nfolds=3/
     predictions.csv    # --predictions-out
     folds.csv          # --folds-out
     plots/             # --plots
-    member_predictions.csv   # with --nfolds
+    member_predictions.csv   # --member-predictions-out
 ```
 
-With `--nfolds`, `member_predictions.csv` holds one row per molecule per fitted model (`smiles, isoform, model,
+`--member-predictions-out` (with `--nfolds`) saves one row per molecule per fitted model (`smiles, isoform, model,
 input, seed, fold, role, y_true, y_pred`), where `role` is `fit` for the rows that model was trained on and `holdout`
 for the fold it was held out of. The `holdout` rows are exactly what an affine recalibration is fitted on, so any
-post-hoc calibration can be refitted from the CSV without retraining anything; `--no-member-predictions` skips it,
-since predicting on the fit rows is extra inference.
+post-hoc calibration can be refitted from the CSV without retraining anything. It is off by default, since predicting
+on the fit rows is extra inference and the file grows with models x inputs x isoforms x seeds x folds.
 
 Flags that write a file take an optional path: bare (`--predictions-out`) writes the default name in the run folder,
 and with a path it writes there instead. `train-model` puts its checkpoints and metrics in the run folder too, unless

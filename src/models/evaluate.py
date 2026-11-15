@@ -844,17 +844,12 @@ def main() -> None:
         "metrics use a map fitted on the other folds only. Requires --nfolds",
     )
     parser.add_argument(
-        "--no-member-predictions",
-        action="store_true",
-        help="Don't write member_predictions.csv. By default, with --nfolds, every fitted model's predictions on "
-        "the rows it was fitted on (role=fit) and on the fold it was held out of (role=holdout) are saved to the "
-        "run folder, per model, input, isoform, seed and fold, so an affine recalibration (or any other "
-        "post-processing) can be fitted afterwards without refitting. Predicting on the fit rows is extra "
-        "inference, which this flag skips",
-    )
-    parser.add_argument(
-        "--member-predictions-out", type=Path, default=None,
-        help="Write the member predictions somewhere other than member_predictions.csv in the run folder",
+        "--member-predictions-out", type=Path, nargs="?", const=IN_RUN_DIR, default=None,
+        help="Write every fitted model's predictions on the rows it was fitted on (role=fit) and on the fold it "
+        "was held out of (role=holdout) to a CSV, per model, input, isoform, seed and fold, so an affine "
+        "recalibration (or any other post-processing) can be fitted afterwards without refitting. Bare, it writes "
+        "member_predictions.csv in the run folder; with a path, there. Needs --nfolds, and predicting on the fit "
+        "rows is extra inference",
     )
     parser.add_argument(
         "--affine-out",
@@ -1025,9 +1020,7 @@ def main() -> None:
         args.output_md = _resolve_out(args.output_md or IN_RUN_DIR, log.dir, "results.md")
         if args.affine_recalibration:
             args.affine_out = _resolve_out(args.affine_out or IN_RUN_DIR, log.dir, "affine.csv")
-        args.member_predictions_out = _resolve_out(
-            args.member_predictions_out or IN_RUN_DIR, log.dir, "member_predictions.csv",
-        )
+        args.member_predictions_out = _resolve_out(args.member_predictions_out, log.dir, "member_predictions.csv")
         args.plots_dir = args.plots_dir or log.dir / "plots"
         _run(parser, args, log.dir)
 
@@ -1062,12 +1055,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
     # Per-member predictions need folds: without them nothing is ever held out to recalibrate on.
-    save_members = args.nfolds is not None and not args.no_member_predictions
+    save_members = args.member_predictions_out is not None
     # Recalibrating always draws its own plot; asking for the plot fits the map without applying it.
     plot_kinds = list(dict.fromkeys((args.plots or []) + (["affine"] if args.affine_recalibration else [])))
     fit_affine_maps = args.affine_recalibration or "affine" in plot_kinds
     if args.nseeds < 1:
         parser.error(f"--nseeds must be >= 1, got {args.nseeds}")
+    if args.member_predictions_out is not None and args.nfolds is None:
+        parser.error("--member-predictions-out requires --nfolds (without folds nothing is held out to refit on)")
     if args.folds_out is not None and args.nfolds is None:
         parser.error("--folds-out requires --nfolds")
     if args.ensemble in _STACKERS and args.nfolds is None:
