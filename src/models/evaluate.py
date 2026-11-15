@@ -1262,7 +1262,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
             if args.affine_recalibration:
                 # Both versions are scored, so the tables show what the map bought (or cost); everything
                 # else a run exports uses the recalibrated one.
-                _score_only(target, f"{name} [raw]", input_label, out, data)
+                _score_only(target, name, input_label, out, data)
                 name = f"{name} [affine]"
                 out = calibrated
                 # n_oof is how many out-of-fold rows the map was fitted on: a small one is a noisy slope.
