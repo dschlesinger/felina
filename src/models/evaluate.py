@@ -30,7 +30,7 @@ from models.TabPFN import WIDE_FEATURES as _TABPFN_WIDE
 from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
 from models.recalibrate import apply_affine, recalibrate
-from models.run_log import changed_flags, print_split, run_log
+from models.run_log import changed_flags, clean_interrupt, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
 from data_tools.paths import DATA_DIR, FEATURE_DIR
 
@@ -1013,7 +1013,7 @@ def main() -> None:
     )
     parser.add_argument("--plots-dir", type=Path, default=None, help="Directory for --plots output (default: plots/ in the run folder)")
     args = parser.parse_args()
-    with run_log("eval", changed_flags(args, parser, skip=_UNNAMED_FLAGS)) as log:
+    with clean_interrupt("evaluate-models"), run_log("eval", changed_flags(args, parser, skip=_UNNAMED_FLAGS)) as log:
         # Everything this run writes lands in its own folder unless a flag names somewhere else.
         args.predictions_out = _resolve_out(args.predictions_out, log.dir, "predictions.csv")
         args.folds_out = _resolve_out(args.folds_out, log.dir, "folds.csv")

@@ -25,7 +25,7 @@ import copy
 import sys
 
 from data_tools.merge_datasets import describe
-from models.run_log import changed_flags, run_log
+from models.run_log import changed_flags, clean_interrupt, run_log
 from models.training import BACKENDS
 from models.training.common import add_common_arguments, slug
 
@@ -41,6 +41,12 @@ def _as_list(value) -> list:
 
 def main(argv: list[str] | None = None, model: str | None = None) -> None:
     """Entry point for the train-model CLI (`model` pins the backend for the legacy aliases)."""
+    with clean_interrupt("train-model"):
+        _train(argv, model)
+
+
+def _train(argv: list[str] | None, model: str | None) -> None:
+    """Parse the arguments and run every (datasets x learning rate x variant x seed) combination."""
     argv = sys.argv[1:] if argv is None else argv
     if model is None:
         pre = argparse.ArgumentParser(add_help=False)

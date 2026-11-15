@@ -15,6 +15,7 @@ from data_tools import dataset_alias
 from data_tools.dataset_spec import Source
 from data_tools.datasets import Dataset, registry
 from data_tools.paths import DATA_DIR
+from models.run_log import clean_interrupt
 
 console = Console()
 
@@ -155,6 +156,12 @@ def _alias(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the data CLI."""
+    with clean_interrupt("data"):
+        _run(argv)
+
+
+def _run(argv: list[str] | None) -> None:
+    """Parse the arguments and do the requested work."""
     parser = argparse.ArgumentParser(description="Manage the project's datasets.")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory holding the datasets (default: DATA_FOLDER, else data)")
     commands = parser.add_subparsers(dest="command", required=True)

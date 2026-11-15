@@ -228,6 +228,22 @@ class _Tee:
 
 
 @contextlib.contextmanager
+def clean_interrupt(what: str) -> Iterator[None]:
+    """Turn Ctrl-C into one line on stderr and exit code 130, instead of a traceback.
+
+    Wrap a CLI's body in this, outside `run_log`, so the run's own log still records the interrupt
+    before the process goes. The traceback it swallows is whatever numeric code happened to be running
+    when the signal landed, which says nothing about why the user pressed Ctrl-C.
+    """
+    try:
+        yield
+    except KeyboardInterrupt:
+        # The leading newline lands after a half-drawn progress bar.
+        print(f"\n{what} interrupted (Ctrl-C)", file=sys.stderr)
+        sys.exit(130)
+
+
+@contextlib.contextmanager
 def run_log(kind: str, flags: Mapping[str, object], header: Mapping[str, str] | None = None, runs_dir: Path | None = None) -> Iterator[RunLog]:
     """Log stdout and stderr of the enclosed block to the next `<id>__<kind>__<flags>.log` while still printing them."""
     run_id, path, handle = _open_log(kind, flags, runs_dir or RUNS_DIR)

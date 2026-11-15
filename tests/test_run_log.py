@@ -102,3 +102,19 @@ def test_migrate_moves_flat_logs_and_keeps_ids(tmp_path):
     assert migrate_flat_logs(tmp_path) == []  # nothing left to move
     with run_log("eval", {}, runs_dir=tmp_path) as log:  # the migrated id is still taken
         assert log.id == 2
+
+
+def test_clean_interrupt_reports_one_line(tmp_path):
+    script = (
+        "import sys; from pathlib import Path\n"
+        "from models.run_log import clean_interrupt, run_log\n"
+        "with clean_interrupt('evaluate-models'):\n"
+        "    with run_log('eval', {}, runs_dir=Path(sys.argv[1])):\n"
+        "        raise KeyboardInterrupt\n"
+    )
+    env = {**os.environ, "PYTHONPATH": "src"}
+    done = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, env=env)
+    assert done.returncode == 130
+    assert done.stderr.strip() == "evaluate-models interrupted (Ctrl-C)"
+    assert "Traceback" not in done.stderr
+    assert list_runs(tmp_path)[0].status == "interrupted"  # the log still records it
