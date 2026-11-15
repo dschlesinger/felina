@@ -379,6 +379,10 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
   predictions only and applied once to the validation and blind rows; the CV
   metrics use a map fitted on the other folds, so they stay honest. Slopes and
   intercepts are printed in an `Affine recalibration` table. Plain `--nfolds`.
+  An `affine` plot is drawn per isoform and model, showing the out-of-fold
+  predictions before and after the map with each cloud's trend line; it can also
+  be asked for on its own with `--plots affine`, which fits the map for the plot
+  without applying it to the scores. Both need `--nfolds`.
   The maps are also written to `affine.csv` in the run folder, one row per
   (isoform, model, input) with the `split`, `seed` and `n_oof` they were fitted
   under. A small `n_oof` means a noisy slope. `--affine-out <path>` writes them

@@ -29,7 +29,7 @@ from models import REGISTRY, CYPModel, dimred
 from models.TabPFN import WIDE_FEATURES as _TABPFN_WIDE
 from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
-from models.recalibrate import recalibrate
+from models.recalibrate import apply_affine, recalibrate
 from models.run_log import changed_flags, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
 from data_tools.paths import DATA_DIR, FEATURE_DIR
@@ -1011,10 +1011,15 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         parser.error("--cv-filter requires --nfolds")
     if args.affine_recalibration and args.nfolds is None:
         parser.error("--affine-recalibration requires --nfolds (it is fitted on out-of-fold predictions)")
+    if "affine" in (args.plots or []) and args.nfolds is None:
+        parser.error("--plots affine requires --nfolds (the map it draws is fitted on out-of-fold predictions)")
     if args.affine_out is not None and not args.affine_recalibration:
         parser.error("--affine-out requires --affine-recalibration (there are no fitted maps to write otherwise)")
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
+    # Recalibrating always draws its own plot; asking for the plot fits the map without applying it.
+    plot_kinds = list(dict.fromkeys((args.plots or []) + (["affine"] if args.affine_recalibration else [])))
+    fit_affine_maps = args.affine_recalibration or "affine" in plot_kinds
     if args.nseeds < 1:
         parser.error(f"--nseeds must be >= 1, got {args.nseeds}")
     if args.folds_out is not None and args.nfolds is None:
@@ -1175,12 +1180,18 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
 
     def record(target: str, name: str, input_label: str, out: dict, data: dict) -> None:
         """Score one prediction set on the validation rows and queue it for the printed and exported results."""
-        if args.affine_recalibration:
-            out, (slope, intercept) = recalibrate(out, data["y_train"], data["fold_ids"])
-            # n_oof is how many out-of-fold rows the map was fitted on: a small one is a noisy slope.
-            affine_log.append(dict(zip(_AFFINE_COLUMNS, (
-                target, name, input_label, args.split, args.seed, len(data["y_train"]), slope, intercept,
-            ))))
+        affine = None
+        if fit_affine_maps and data["fold_ids"] is not None:
+            # The affine plot shows what the map does, so it is fitted for the plot alone too; only
+            # --affine-recalibration lets it through to the scored predictions.
+            raw_oof = _oof_pooled(out["holdout"], data["fold_ids"], len(data["y_train"]))
+            calibrated, affine = recalibrate(out, data["y_train"], data["fold_ids"])
+            if args.affine_recalibration:
+                out = calibrated
+                # n_oof is how many out-of-fold rows the map was fitted on: a small one is a noisy slope.
+                affine_log.append(dict(zip(_AFFINE_COLUMNS, (
+                    target, name, input_label, args.split, args.seed, len(data["y_train"]), *affine,
+                ))))
         predictions = out["val"]
         y_val = data["y_val"]
         metrics = _compute_metrics(pl.Series("actual", y_val.tolist()), pl.Series("prediction", predictions.tolist()))
@@ -1195,11 +1206,16 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                 )))
                 for smiles, actual, pred in zip(data["val_smiles"], y_val, predictions)
             )
-        if args.plots:
+        if plot_kinds:
             plot_rows.append({
                 "target": target, "name": name, "input": input_label, "is_ensemble": name.startswith("ensemble["),
                 "y_train": data["y_train"], "y_val": y_val, "pred_val": np.asarray(predictions, dtype=float),
                 "pred_blind": None if out["blind"] is None else np.asarray(out["blind"], dtype=float),
+                # The affine plot needs the out-of-fold predictions the map was fitted on, before and after it.
+                "y_oof": None if affine is None else data["y_train"],
+                "pred_oof": None if affine is None else raw_oof,
+                "pred_oof_cal": None if affine is None else apply_affine(raw_oof, *affine),
+                "affine": affine,
             })
         if unblinded_labels and out["blind"] is not None:
             actual = unblinded_labels[target]
@@ -1324,10 +1340,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
 
     progress.close()
     if plot_rows:
-        written = write_files(args.plots, plot_rows, args.plots_dir)
+        written = write_files(plot_kinds, plot_rows, args.plots_dir)
         print(f"Wrote {len(written)} plots to {args.plots_dir}", file=sys.stderr)
         if args.plots_terminal:
-            show_terminal(args.plots, plot_rows)
+            show_terminal(plot_kinds, plot_rows)
     if args.predict_blind:
         out_dir = run_dir
         out_dir.mkdir(parents=True, exist_ok=True)
