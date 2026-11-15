@@ -379,6 +379,9 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
   predictions only and applied once to the validation and blind rows; the CV
   metrics use a map fitted on the other folds, so they stay honest. Slopes and
   intercepts are printed in an `Affine recalibration` table. Plain `--nfolds`.
+- `--affine-out results/affine.csv`: also write those maps to a CSV, one row per
+  (isoform, model, input) with the `split`, `seed` and `n_oof` they were fitted
+  under. A small `n_oof` means a noisy slope. Refuses to overwrite.
 - Every filter and deduplication decision is logged to stderr and summarised in an
   `ensemble filters` table with each model's scores, kept/dropped status and cluster.
 

@@ -41,3 +41,16 @@ def test_recalibrate_without_blind():
     out = {"val": y[:3], "blind": None, "holdout": {k: y[folds == k] for k in range(2)}}
     cal, _ = recalibrate(out, y, folds)
     assert cal["blind"] is None
+
+
+def test_write_affine_csv(tmp_path):
+    from models.evaluate import _AFFINE_COLUMNS, _write_affine
+
+    rows = [dict(zip(_AFFINE_COLUMNS, ("CYP3A4_pIC50_direct_inhibition", "ridge", "maccs", "scaffold", 42, 1868, 0.75, 1.0)))]
+    path = tmp_path / "nested" / "affine.csv"
+    _write_affine(path, rows)
+    lines = path.read_text().splitlines()
+    assert lines[0] == ",".join(_AFFINE_COLUMNS)
+    assert lines[1] == "CYP3A4_pIC50_direct_inhibition,ridge,maccs,scaffold,42,1868,0.75,1.0"
+    with pytest.raises(OSError, match="already exists|Cannot write"):
+        _write_affine(path, rows)

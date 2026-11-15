@@ -139,6 +139,21 @@ def _write_predictions(path: Path, rows: list[dict[str, object]]) -> None:
         raise OSError(f"Cannot write predictions CSV to {path}: {exc}") from exc
 
 
+_AFFINE_COLUMNS = ["isoform", "model", "input", "split", "seed", "n_oof", "slope", "intercept"]
+
+
+def _write_affine(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write the fitted affine maps to a new CSV, refusing to overwrite."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=_AFFINE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+    except OSError as exc:
+        raise OSError(f"Cannot write affine recalibration CSV to {path}: {exc}") from exc
+
+
 def _write_folds(path: Path, train_df: pl.DataFrame, folds: np.ndarray) -> None:
     """Write each training molecule's fold to a new CSV, refusing to overwrite."""
     try:
@@ -648,15 +663,17 @@ def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
     _print(table)
 
 
-def _print_affine(log: list[tuple[str, str, str, float, float]]) -> None:
+def _print_affine(log: list[dict[str, object]]) -> None:
     """Print the slope and intercept of the affine recalibration applied to each prediction set."""
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title="Affine recalibration", title_style="bold")
-    for column, justify in (("target", "left"), ("model", "left"), ("input", "left"), ("slope", "right"), ("intercept", "right")):
+    for column, justify in (("target", "left"), ("model", "left"), ("input", "left"), ("n_oof", "right"),
+                            ("slope", "right"), ("intercept", "right")):
         table.add_column(column, justify=justify, overflow="fold")
-    for target, name, input_label, slope, intercept in log:
+    for row in log:
         table.add_row(
-            escape(target.replace("_pIC50_direct_inhibition", "")), escape(name), escape(_short(input_label)),
-            f"{slope:.3f}", f"{intercept:+.3f}",
+            escape(str(row["isoform"]).replace("_pIC50_direct_inhibition", "")),
+            escape(str(row["model"])), escape(_short(str(row["input"]))), str(row["n_oof"]),
+            f"{row['slope']:.3f}", f"{row['intercept']:+.3f}",
         )
     console.print()
     console.print(table)
@@ -797,6 +814,12 @@ def main() -> None:
         "fitted by least squares on the out-of-fold predictions of the training portion and applied once to the "
         "validation and blind rows (Platt-style linear recalibration; see models/recalibrate.py). Cross-validation "
         "metrics use a map fitted on the other folds only. Requires --nfolds",
+    )
+    parser.add_argument(
+        "--affine-out",
+        type=Path,
+        help="Write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept) to a new "
+        "CSV (use results/); creates parents, refuses existing files. Requires --affine-recalibration",
     )
     parser.add_argument(
         "--butina-cutoff",
@@ -985,6 +1008,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         parser.error("--cv-filter requires --nfolds")
     if args.affine_recalibration and args.nfolds is None:
         parser.error("--affine-recalibration requires --nfolds (it is fitted on out-of-fold predictions)")
+    if args.affine_out is not None and not args.affine_recalibration:
+        parser.error("--affine-out requires --affine-recalibration (there are no fitted maps to write otherwise)")
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
     if args.nseeds < 1:
@@ -1046,6 +1071,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     if args.folds_out is not None and args.folds_out.exists():
         print(
             f"Cannot write folds CSV to {args.folds_out}: file already exists "
+            "(checked before training; choose a new path or delete it)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.affine_out is not None and args.affine_out.exists():
+        print(
+            f"Cannot write affine recalibration CSV to {args.affine_out}: file already exists "
             "(checked before training; choose a new path or delete it)",
             file=sys.stderr,
         )
@@ -1126,8 +1159,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     plot_rows: list[dict] = []
     stack_reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]] = []
     filter_log: list[dict] = []
-    # (target, model, input, slope, intercept) per recalibrated prediction set
-    affine_log: list[tuple[str, str, str, float, float]] = []
+    # one _AFFINE_COLUMNS row per recalibrated prediction set
+    affine_log: list[dict[str, object]] = []
     # target -> (model, input) -> {val row index: prediction}
     corr_preds: dict[str, dict[tuple[str, str], dict[int, float]]] = {}
     # (model, input) -> target -> prediction per blind row
@@ -1141,7 +1174,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         """Score one prediction set on the validation rows and queue it for the printed and exported results."""
         if args.affine_recalibration:
             out, (slope, intercept) = recalibrate(out, data["y_train"], data["fold_ids"])
-            affine_log.append((target, name, input_label, slope, intercept))
+            # n_oof is how many out-of-fold rows the map was fitted on: a small one is a noisy slope.
+            affine_log.append(dict(zip(_AFFINE_COLUMNS, (
+                target, name, input_label, args.split, args.seed, len(data["y_train"]), slope, intercept,
+            ))))
         predictions = out["val"]
         y_val = data["y_val"]
         metrics = _compute_metrics(pl.Series("actual", y_val.tolist()), pl.Series("prediction", predictions.tolist()))
@@ -1313,6 +1349,14 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                 print(str(exc), file=sys.stderr)
                 sys.exit(1)
             print(f"Wrote {len(blind_rows)} blind predictions to {_blind_path(args.predictions_out)}", file=sys.stderr)
+
+    if args.affine_out is not None:
+        try:
+            _write_affine(args.affine_out, affine_log)
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Wrote {len(affine_log)} affine recalibration maps to {args.affine_out}", file=sys.stderr)
 
     reverse = not _LOWER_IS_BETTER[args.sort_by]
 
