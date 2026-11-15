@@ -398,6 +398,17 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
   (isoform, model, input) with the `split`, `seed` and `n_oof` they were fitted
   under. A small `n_oof` means a noisy slope. `--affine-out <path>` writes them
   somewhere else instead; either way an existing file is never overwritten.
+- `--center-spread moments.csv`: recentre and rescale every prediction set onto a
+  target mean and standard deviation per isoform, read from a CSV with the columns
+  `isoform,mean,std` (`3A4` or the full target column name). Each set is mapped so it
+  carries exactly that mean and spread, with the cross-validation folds sharing the
+  pooled out-of-fold scaling; the transformed predictions are what the run exports, and
+  each model is also scored untransformed as a comparison row. Being monotone, it leaves
+  Spearman and Kendall untouched. It cannot be combined with `--affine-recalibration`:
+  moment matching sets the mean and spread outright, so the affine map's effect on them
+  is overwritten. For squared error it is the worse of the two unless the supplied
+  numbers are genuinely better than what the training labels imply — see
+  `src/models/center_spread.py` for why.
 - Every filter and deduplication decision is logged to stderr and summarised in an
   `ensemble filters` table with each model's scores, kept/dropped status and cluster.
 

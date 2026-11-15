@@ -28,6 +28,7 @@ from data_tools.load import cv_folds, load_data
 from models import REGISTRY, CYPModel, dimred
 from models.TabPFN import WIDE_FEATURES as _TABPFN_WIDE
 from models.caruana import fit_caruana_weights
+from models.center_spread import center_spread, load_targets
 from models.plots import PLOT_KINDS, show_terminal, write_files
 from models.recalibrate import apply_affine, recalibrate
 from models.run_log import changed_flags, clean_interrupt, print_split, run_log
@@ -189,6 +190,20 @@ _UNNAMED_FLAGS = frozenset({
     "predictions_out", "folds_out", "output_md", "plots_dir", "affine_out", "member_predictions_out",
     "cache_dir", "data_dir",
 })
+
+
+def _recentred(out: dict, mean: float, std: float, y_len: int, folds: np.ndarray | None) -> dict:
+    """One prediction set mapped onto `mean` and `std`: validation and blind rows on their own spread,
+    the cross-validation folds together on the pooled out-of-fold spread."""
+    holdout = out["holdout"]
+    if holdout and folds is not None:
+        pooled = _oof_pooled(holdout, folds, y_len)
+        holdout = {k: center_spread(pred, mean, std, source=pooled) for k, pred in holdout.items()}
+    return {
+        "val": center_spread(out["val"], mean, std),
+        "blind": None if out["blind"] is None else center_spread(out["blind"], mean, std),
+        "holdout": holdout,
+    }
 
 
 def _resolve_out(value: Path | None, run_dir: Path, name: str) -> Path | None:
@@ -852,6 +867,17 @@ def main() -> None:
         "rows is extra inference",
     )
     parser.add_argument(
+        "--center-spread",
+        type=Path,
+        default=None,
+        metavar="CSV",
+        help="Recentre and rescale every prediction set onto a target mean and standard deviation per isoform, "
+        "read from a CSV with the columns isoform,mean,std (isoform as 3A4 or the full target column). Each set is "
+        "mapped so it carries exactly that mean and spread; the cross-validation folds share the pooled "
+        "out-of-fold scaling. The transformed predictions are what the run exports, and each model is also scored "
+        "untransformed for comparison. Cannot be combined with --affine-recalibration",
+    )
+    parser.add_argument(
         "--affine-out",
         type=Path,
         help="Where to write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept). "
@@ -1048,12 +1074,24 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         parser.error("--cv-filter requires --nfolds")
     if args.affine_recalibration and args.nfolds is None:
         parser.error("--affine-recalibration requires --nfolds (it is fitted on out-of-fold predictions)")
+    if args.center_spread is not None and args.affine_recalibration:
+        parser.error(
+            "--center-spread and --affine-recalibration are competing calibrations: moment matching sets the "
+            "mean and spread outright, so whatever the affine map did to them is overwritten. Pick one"
+        )
     if "affine" in (args.plots or []) and args.nfolds is None:
         parser.error("--plots affine requires --nfolds (the map it draws is fitted on out-of-fold predictions)")
     if args.affine_out is not None and not args.affine_recalibration:
         parser.error("--affine-out requires --affine-recalibration (there are no fitted maps to write otherwise)")
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
+    centre_targets: dict[str, tuple[float, float]] = {}
+    if args.center_spread is not None:
+        try:
+            centre_targets = load_targets(args.center_spread)
+        except ValueError as exc:
+            parser.error(str(exc))
+
     # Per-member predictions need folds: without them nothing is ever held out to recalibrate on.
     save_members = args.member_predictions_out is not None
     # Recalibrating always draws its own plot; asking for the plot fits the map without applying it.
@@ -1219,6 +1257,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     # one _AFFINE_COLUMNS row per recalibrated prediction set
     affine_log: list[dict[str, object]] = []
     member_rows: list[dict[str, object]] = []
+    uncentred: set[str] = set()
     # target -> (model, input) -> {val row index: prediction}
     corr_preds: dict[str, dict[tuple[str, str], dict[int, float]]] = {}
     # (model, input) -> target -> prediction per blind row
@@ -1269,6 +1308,18 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                 affine_log.append(dict(zip(_AFFINE_COLUMNS, (
                     target, name, input_label, args.split, args.seed, len(data["y_train"]), *affine,
                 ))))
+        if centre_targets:
+            if target not in centre_targets:
+                if target not in uncentred:  # once per target, not once per model and input
+                    uncentred.add(target)
+                    print(
+                        f"No centre/spread for {target} in {args.center_spread}: leaving it untransformed",
+                        file=sys.stderr,
+                    )
+            else:
+                _score_only(target, name, input_label, out, data)
+                name = f"{name} [centered]"
+                out = _recentred(out, *centre_targets[target], len(data["y_train"]), data["fold_ids"])
         predictions = out["val"]
         y_val = data["y_val"]
         metrics = _compute_metrics(pl.Series("actual", y_val.tolist()), pl.Series("prediction", predictions.tolist()))
@@ -1495,6 +1546,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
         + escape(_short(" | ".join(" + ".join(g) for g in args.input)))
         + f"  [dim]split[/]={args.split}  [dim]seed[/]={args.seed}"
         + (f"  [dim]dimred[/]={escape(' '.join(args.dimred))}" if args.dimred else "")
+        + (f"  [dim]center-spread[/]={escape(args.center_spread.name)}" if args.center_spread else "")
         + (f"  [dim]nseeds[/]={args.nseeds}" if args.nseeds > 1 else "")
         + (f"  [dim]ensemble[/]={method}" if ensembling else "")
         + (f"  [dim]cv-filter[/]={'+'.join(filters)}" if filters else "")
