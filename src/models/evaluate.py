@@ -1228,6 +1228,29 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     target_data: dict[str, dict] = {}
     misaligned: set[str] = set()
 
+    def _score_only(target: str, name: str, input_label: str, out: dict, data: dict) -> None:
+        """Queue one prediction set for the printed result tables alone, exporting and plotting nothing."""
+        results.append((target, name, input_label, {
+            **_compute_metrics(
+                pl.Series("actual", data["y_val"].tolist()), pl.Series("prediction", out["val"].tolist()),
+            ),
+            "n_train": len(data["y_train"]), "n_val": len(data["y_val"]),
+        }))
+        if data["fold_ids"] is not None:
+            cv_results.append((target, name, input_label, _cv_metrics(out["holdout"], data["y_train"], data["fold_ids"])))
+        if unblinded_labels and out["blind"] is not None:
+            actual = unblinded_labels[target]
+            predicted = np.asarray(out["blind"], dtype=float)
+            scored = np.isfinite(actual) & np.isfinite(predicted)
+            if scored.any():
+                unblinded_results.append((target, name, input_label, {
+                    **_compute_metrics(
+                        pl.Series("actual", actual[scored].tolist()),
+                        pl.Series("prediction", predicted[scored].tolist()),
+                    ),
+                    "n_train": len(data["y_train"]), "n_val": int(scored.sum()),
+                }))
+
     def record(target: str, name: str, input_label: str, out: dict, data: dict) -> None:
         """Score one prediction set on the validation rows and queue it for the printed and exported results."""
         affine = None
@@ -1237,6 +1260,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
             raw_oof = _oof_pooled(out["holdout"], data["fold_ids"], len(data["y_train"]))
             calibrated, affine = recalibrate(out, data["y_train"], data["fold_ids"])
             if args.affine_recalibration:
+                # Both versions are scored, so the tables show what the map bought (or cost); everything
+                # else a run exports uses the recalibrated one.
+                _score_only(target, f"{name} [raw]", input_label, out, data)
+                name = f"{name} [affine]"
                 out = calibrated
                 # n_oof is how many out-of-fold rows the map was fitted on: a small one is a noisy slope.
                 affine_log.append(dict(zip(_AFFINE_COLUMNS, (
