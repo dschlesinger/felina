@@ -169,7 +169,7 @@ def _write_folds(path: Path, train_df: pl.DataFrame, folds: np.ndarray) -> None:
 # An output flag given with no value writes the run folder's default name for that output.
 IN_RUN_DIR = Path("@run")
 # Output paths say where a run's files went, not what the experiment was, so they stay out of the folder name.
-_UNNAMED_FLAGS = frozenset({"predictions_out", "folds_out", "output_md", "plots_dir", "cache_dir", "data_dir"})
+_UNNAMED_FLAGS = frozenset({"predictions_out", "folds_out", "output_md", "plots_dir", "affine_out", "cache_dir", "data_dir"})
 
 
 def _resolve_out(value: Path | None, run_dir: Path, name: str) -> Path | None:
@@ -818,8 +818,9 @@ def main() -> None:
     parser.add_argument(
         "--affine-out",
         type=Path,
-        help="Write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept) to a new "
-        "CSV (use results/); creates parents, refuses existing files. Requires --affine-recalibration",
+        help="Where to write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept). "
+        "With --affine-recalibration they are always written: by default to affine.csv in the run folder, which this "
+        "flag redirects. Creates parents, refuses existing files",
     )
     parser.add_argument(
         "--butina-cutoff",
@@ -981,6 +982,8 @@ def main() -> None:
         args.predictions_out = _resolve_out(args.predictions_out, log.dir, "predictions.csv")
         args.folds_out = _resolve_out(args.folds_out, log.dir, "folds.csv")
         args.output_md = _resolve_out(args.output_md or IN_RUN_DIR, log.dir, "results.md")
+        if args.affine_recalibration:
+            args.affine_out = _resolve_out(args.affine_out or IN_RUN_DIR, log.dir, "affine.csv")
         args.plots_dir = args.plots_dir or log.dir / "plots"
         _run(parser, args, log.dir)
 
@@ -1350,7 +1353,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                 sys.exit(1)
             print(f"Wrote {len(blind_rows)} blind predictions to {_blind_path(args.predictions_out)}", file=sys.stderr)
 
-    if args.affine_out is not None:
+    if affine_log:
         try:
             _write_affine(args.affine_out, affine_log)
         except OSError as exc:
