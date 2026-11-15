@@ -31,7 +31,7 @@ from models.caruana import fit_caruana_weights
 from models.plots import PLOT_KINDS, show_terminal, write_files
 from models.run_log import changed_flags, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
-from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
+from data_tools.paths import DATA_DIR, FEATURE_DIR
 
 _CYP_TARGETS = [
     "CYP1A2_pIC50_direct_inhibition",
@@ -148,6 +148,19 @@ def _write_folds(path: Path, train_df: pl.DataFrame, folds: np.ndarray) -> None:
             ).write_csv(stream)
     except OSError as exc:
         raise OSError(f"Cannot write folds CSV to {path}: {exc}") from exc
+
+
+# An output flag given with no value writes the run folder's default name for that output.
+IN_RUN_DIR = Path("@run")
+# Output paths say where a run's files went, not what the experiment was, so they stay out of the folder name.
+_UNNAMED_FLAGS = frozenset({"predictions_out", "folds_out", "output_md", "plots_dir", "cache_dir", "data_dir"})
+
+
+def _resolve_out(value: Path | None, run_dir: Path, name: str) -> Path | None:
+    """Where an output flag writes: the path it was given, or `name` inside the run folder when given bare."""
+    if value is None:
+        return None
+    return run_dir / name if value == IN_RUN_DIR else value
 
 
 _MIN_LABEL_WIDTH = 4
@@ -800,9 +813,9 @@ def main() -> None:
         "--nfolds or --nseeds is used",
     )
     parser.add_argument(
-        "--folds-out", type=Path,
-        help="Write the --nfolds fold of every training molecule to a new CSV (use results/); "
-        "creates parents, refuses existing files",
+        "--folds-out", type=Path, nargs="?", const=IN_RUN_DIR,
+        help="Write the --nfolds fold of every training molecule to a CSV. Bare, it writes folds.csv in the "
+        "run folder; with a path, there. Creates parents, refuses existing files",
     )
     parser.add_argument(
         "--no-cv-deduplication",
@@ -859,8 +872,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-md", type=Path, default=None,
-        help="Also write full-name result tables (and the correlation matrices if --correlation is set) to this "
-        "markdown file; unlike the console tables, names are never truncated to the terminal width",
+        help="Where to write the full-name result tables (and the correlation matrices if --correlation is set). "
+        "They are always written: by default to results.md in the run folder, which this flag redirects. Unlike "
+        "the console tables, names are never truncated to the terminal width",
     )
     parser.add_argument(
         "--dimred",
@@ -876,14 +890,15 @@ def main() -> None:
     parser.add_argument("--cache-dir", default=FEATURE_DIR, help="Directory for cached feature matrices")
     parser.add_argument("--sort-by", default="MAE", choices=_METRICS, help="Metric to sort results by")
     parser.add_argument(
-        "--predictions-out", type=Path,
-        help="Write validation predictions to a new CSV (use results/); creates parents, refuses existing files",
+        "--predictions-out", type=Path, nargs="?", const=IN_RUN_DIR,
+        help="Write validation predictions to a CSV (and blind predictions to a .blind.csv sibling). Bare, it "
+        "writes predictions.csv in the run folder; with a path, there. Creates parents, refuses existing files",
     )
     parser.add_argument(
         "--predict-blind",
         action="store_true",
         help="Also predict the blinded test set (data/test.csv) with each fitted model and write one CSV per "
-        "(model, input) to results/<model>_<input>_blind_predictions.csv. Models are fit on the train split only.",
+        "(model, input) to <run folder>/<model>_<input>_blind_predictions.csv. Models are fit on the train split only.",
     )
     parser.add_argument(
         "--unblinded",
@@ -913,14 +928,19 @@ def main() -> None:
         "Uses inline images (kitty, WezTerm, ghostty, iTerm2) and falls back to text plots (plotext), "
         "wrapped to the terminal width, anywhere else",
     )
-    parser.add_argument("--plots-dir", type=Path, default=RESULTS_DIR / "plots", help="Directory for --plots output")
+    parser.add_argument("--plots-dir", type=Path, default=None, help="Directory for --plots output (default: plots/ in the run folder)")
     args = parser.parse_args()
-    with run_log("eval", changed_flags(args, parser)):
-        _run(parser, args)
+    with run_log("eval", changed_flags(args, parser, skip=_UNNAMED_FLAGS)) as log:
+        # Everything this run writes lands in its own folder unless a flag names somewhere else.
+        args.predictions_out = _resolve_out(args.predictions_out, log.dir, "predictions.csv")
+        args.folds_out = _resolve_out(args.folds_out, log.dir, "folds.csv")
+        args.output_md = _resolve_out(args.output_md or IN_RUN_DIR, log.dir, "results.md")
+        args.plots_dir = args.plots_dir or log.dir / "plots"
+        _run(parser, args, log.dir)
 
 
-def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Evaluate the models for parsed arguments."""
+def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Path) -> None:
+    """Evaluate the models for parsed arguments, writing this run's files into `run_dir`."""
     args.input = args.input or [["rdkit"]]
 
     if args.targets is not None and args.isoforms is not None:
@@ -1240,7 +1260,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         if args.plots_terminal:
             show_terminal(args.plots, plot_rows)
     if args.predict_blind:
-        out_dir = RESULTS_DIR
+        out_dir = run_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         for (name, input_label), by_target in blind_preds.items():
             path = out_dir / f"{re.sub(r'[^\w+.-]', '_', name)}_{re.sub(r'[^\w+.-]', '_', input_label.replace(' + ', '+'))}_blind_predictions.csv"

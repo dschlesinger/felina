@@ -151,10 +151,25 @@ motif-report         # generate reports/pharmacophore_features.md from the pharm
 list-runs            # previous train-model / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
 ```
 
-`train-model` (one log per seed/config of a sweep) and `evaluate-models` write their output to
-`results/runs/<id>__<train|eval>__<flags>.log` while still printing it. The id counts up, and the filename lists the
-flags that differ from their default (`key=value`, `+` between list items). Each log starts with the full command and git
-commit and ends with a `# finished:` line holding status and duration.
+`train-model` (one run per seed/config of a sweep) and `evaluate-models` give every run its own folder,
+`results/runs/<id>__<train|eval>__<flags>/`, and write everything the run produces into it. The id counts up, and the
+folder name lists the flags that differ from their default (`key=value`, `+` between list items; output paths are left
+out). `run.log` holds the output while still printing it, starting with the full command and git commit and ending with
+a `# finished:` line holding status and duration.
+
+```text
+results/runs/0095__eval__input=maccs_models=ridge_nfolds=3/
+    run.log            # always
+    results.md         # always: the full-width result tables (--output-md redirects it)
+    predictions.csv    # --predictions-out
+    folds.csv          # --folds-out
+    plots/             # --plots
+```
+
+Flags that write a file take an optional path: bare (`--predictions-out`) writes the default name in the run folder,
+and with a path it writes there instead. `train-model` puts its checkpoints and metrics in the run folder too, unless
+`--output-dir` names somewhere else. Logs from before run folders existed are flat `.log` files; `list-runs` still
+reads them, and `list-runs --migrate` moves them into folders.
 
 
 ## Representations
@@ -207,12 +222,13 @@ a dataset name or alias, a filename under `--data-dir`, or a path
 (`--unblinded test_unblinded`, `--unblinded data/other.csv`), so any labelled set with the
 same `Molecule_Name` and target columns can be scored.
 
-`--predictions-out <path>` optionally saves one UTF-8 long-format CSV containing
-validation predictions for every selected model, input set, and target (when blind-set
+`--predictions-out` optionally saves one UTF-8 long-format CSV containing
+validation predictions for every selected model, input set, and target — bare it writes
+`predictions.csv` in the run folder, or pass a path. When blind-set
 predictions are computed, via `--predict-blind` or `--plots train-test`, it also writes a
 sibling `<stem>.blind.csv`, `molecule,isoform,model,input,split,seed,y_pred`, which
 `plot-results` reads; `--predict-blind` separately writes one
-`results/<model>_<input>_blind_predictions.csv` per model and input):
+`<run folder>/<model>_<input>_blind_predictions.csv` per model and input:
 
 ```text
 smiles,isoform,model,input,split,seed,y_true,y_pred

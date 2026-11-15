@@ -52,7 +52,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Heads to train on (default: every head of the selected datasets). Missing labels are masked in the loss.",
     )
-    parser.add_argument("--output-dir", type=Path, default=None, help="Directory for outputs (default: results/<model>/<config>; with several runs, <output-dir>/<config>/seed<N>)")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Directory for outputs (default: the run's own folder under results/runs/; with several runs and an explicit path, <output-dir>/<config>/seed<N>)")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs (default: 50)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed, or the first seed with --n-seeds (default: 42)")
     parser.add_argument("--seeds", nargs="+", type=int, default=None, help="Train every config once per seed listed")

@@ -30,7 +30,7 @@ def test_run_log_names_ids_and_captures_output(tmp_path, capfd):
     with run_log("train", {"model": "chemprop", "seed": 7}, runs_dir=tmp_path) as log:
         log.code = 1
 
-    first = tmp_path / "0001__eval__models=xgb+rf_plots.log"
+    first = tmp_path / "0001__eval__models=xgb+rf_plots" / "run.log"
     assert first.is_file()
     text = first.read_text()
     assert "from python" in text and "from child" in text and "to stderr" in text
@@ -72,5 +72,33 @@ def test_print_split_routes_terminal_and_log(tmp_path):
     env = {**os.environ, "PYTHONPATH": "src"}
     shown = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, env=env, check=True).stdout
     assert shown.splitlines() == ["shared", "short\u2026", "after"]
-    body = next(tmp_path.glob("*.log")).read_text().split("# ---\n", 1)[1]
+    body = next(tmp_path.glob("*/run.log")).read_text().split("# ---\n", 1)[1]
     assert body.splitlines()[:3] == ["shared", "full name", "after"]
+
+
+def test_run_gets_its_own_folder(tmp_path):
+    with run_log("eval", {"models": ["ridge"]}, runs_dir=tmp_path) as log:
+        assert log.dir == tmp_path / "0001__eval__models=ridge"
+        assert log.dir.is_dir()
+        (log.dir / "results.md").write_text("# results\n")
+    run = list_runs(tmp_path)[0]
+    assert run.path == tmp_path / "0001__eval__models=ridge" / "run.log"
+    assert (run.path.parent / "results.md").is_file()
+
+
+def test_migrate_moves_flat_logs_and_keeps_ids(tmp_path):
+    from models.run_log import migrate_flat_logs
+
+    flat = tmp_path / "0001__eval__models=ridge.log"
+    flat.write_text("# run: 0001\n# ---\nold output\n# finished: x status=ok duration=3s\n")
+    assert [(r.id, r.kind) for r in list_runs(tmp_path)] == [(1, "eval")]  # read before migrating
+
+    moved = migrate_flat_logs(tmp_path)
+    assert moved == [(flat, tmp_path / "0001__eval__models=ridge" / "run.log")]
+    assert not flat.exists()
+    run = list_runs(tmp_path)[0]
+    assert (run.id, run.status, run.flags) == (1, "ok", "models=ridge")
+
+    assert migrate_flat_logs(tmp_path) == []  # nothing left to move
+    with run_log("eval", {}, runs_dir=tmp_path) as log:  # the migrated id is still taken
+        assert log.id == 2
