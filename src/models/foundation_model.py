@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from data_tools import standardization
 from data_tools.inputs import featurize
 from data_tools.representations_cli import _molecules
 from representations.chemprop_weights import cache_name as chemprop_cache_name
@@ -242,7 +243,9 @@ def _run() -> None:
     )
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing train.csv and test.csv")
     parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
+    standardization.add_argument(parser)
     args = parser.parse_args()
+    standardization.set_mode(args.standardization)
 
     if not (args.list or args.paths or args.generate_cache):
         parser.print_help()

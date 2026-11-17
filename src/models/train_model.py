@@ -24,6 +24,7 @@ import argparse
 import copy
 import sys
 
+from data_tools import standardization
 from data_tools.merge_datasets import describe
 from models.run_log import changed_flags, clean_interrupt, run_log
 from models.training import BACKENDS
@@ -72,6 +73,8 @@ def _train(argv: list[str] | None, model: str | None) -> None:
     parser.set_defaults(**backend.defaults)
     args, extra = parser.parse_known_args(argv)
     args.parser = parser
+    # Process-wide so featurize() and any subprocess backend use the same mode as the merged table.
+    standardization.set_mode(args.standardization)
 
     if args.list_datasets:
         print(describe())

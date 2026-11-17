@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from data_tools import standardization
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from data_tools.datasets import challenge
 from data_tools.load import load_data, load_test, load_train, test_file, train_file
@@ -25,9 +26,14 @@ console = Console()
 
 
 def _molecules(data_dir: Path) -> pl.DataFrame:
-    """Unique SMILES of the challenge train and blinded test sets: what evaluate-models featurizes."""
+    """Unique SMILES of the challenge train and blinded test sets: what evaluate-models featurizes.
+
+    Standardized under the active mode, so the molecule count and the --check
+    coverage column are counted in the same spelling the cache is keyed on.
+    """
     frames = [load_train(data_dir / train_file()).select("SMILES"), load_test(data_dir / test_file()).select("SMILES")]
-    return pl.concat(frames).unique(subset=["SMILES"], keep="first", maintain_order=True)
+    molecules = standardization.standardize_column(pl.concat(frames), "SMILES")
+    return molecules.unique(subset=["SMILES"], keep="first", maintain_order=True)
 
 
 def _size(num_bytes: int) -> str:
@@ -305,7 +311,9 @@ def _run() -> None:
     )
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help=f"Directory containing {train_file()} and {test_file()}")
     parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
+    standardization.add_argument(parser)
     args = parser.parse_args()
+    standardization.set_mode(args.standardization)
 
     if not args.check and not args.embed and not args.alias and not args.evaluate:
         parser.error("pass --check, --embed, --alias and/or --evaluate")
