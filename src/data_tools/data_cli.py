@@ -154,6 +154,20 @@ def _alias(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
     dataset_alias.set_alias(dataset_alias.resolve(args.dataset, known), args.alias, known)
 
 
+def _explore_cmd(args: argparse.Namespace) -> None:
+    """Deferred import: rdkit, matplotlib and scipy cost seconds, and `data list` must not pay for them."""
+    from data_tools.dataset_explore import run
+
+    run(args)
+
+
+def _compare_cmd(args: argparse.Namespace) -> None:
+    """Deferred for the same reason as `_explore_cmd`."""
+    from data_tools.dataset_compare import run
+
+    run(args)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the data CLI."""
     with clean_interrupt("data"):
@@ -183,6 +197,31 @@ def _run(argv: list[str] | None) -> None:
     alias.add_argument("alias", nargs="?", help="New alias")
     alias.add_argument("--remove", metavar="ALIAS", help="Delete this alias")
     alias.set_defaults(run=_alias)
+
+    explore = commands.add_parser("explore", help="Cluster a dataset and draw each cluster's medoid, size, labels and standout features")
+    explore.add_argument("dataset", help="Dataset name, alias, or path to a CSV with a SMILES column")
+    explore.add_argument("--targets", nargs="+", metavar="COLUMN", help="Label columns to summarize (default: the challenge's, else every numeric column)")
+    explore.add_argument("--cutoff", type=float, default=0.4, help="Butina distance cutoff; lower means tighter clusters (default: 0.4)")
+    explore.add_argument("--min-size", type=int, default=5, help="Smallest cluster worth summarizing (default: 5)")
+    explore.add_argument("--max-clusters", type=int, default=12, help="How many clusters to summarize and draw (default: 12)")
+    explore.add_argument("--top-features", type=int, default=3, help="Standout features reported per cluster (default: 3)")
+    explore.add_argument("--max-molecules", type=int, default=0, help="Sample this many molecules first; 0 uses all of them")
+    explore.add_argument("--smiles-column", default="SMILES", help="Column holding the molecules (default: SMILES)")
+    explore.add_argument("--seed", type=int, default=0, help="Seed for sampling (default: 0)")
+    explore.add_argument("--out", help="Figure path (default: reports/<dataset>_clusters.png)")
+    explore.set_defaults(run=lambda args, _datasets: _explore_cmd(args))
+
+    compare = commands.add_parser("compare", help="Measure overlap, separability, distance and label shift between two datasets")
+    compare.add_argument("left", help="Reference dataset: name, alias, or CSV path")
+    compare.add_argument("right", help="Dataset to compare against it")
+    compare.add_argument("--targets", nargs="+", metavar="COLUMN", help="Label columns to test (default: the challenge's, else every shared numeric column)")
+    compare.add_argument("--cutoff", type=float, default=0.4, help="Butina distance cutoff for cluster coverage (default: 0.4)")
+    compare.add_argument("--top-features", type=int, default=6, help="Separating features to report (default: 6)")
+    compare.add_argument("--max-samples", type=int, default=3000, help="Molecules sampled per side for the probe and distance work (default: 3000)")
+    compare.add_argument("--smiles-column", default="SMILES", help="Column holding the molecules (default: SMILES)")
+    compare.add_argument("--seed", type=int, default=0, help="Seed for sampling and cross-validation (default: 0)")
+    compare.add_argument("--out", help="Also write the report to this file")
+    compare.set_defaults(run=lambda args, _datasets: _compare_cmd(args))
 
     args = parser.parse_args(argv)
     try:
