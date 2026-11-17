@@ -1,13 +1,20 @@
-"""Per-run logs in `<RESULTS_FOLDER>/runs`, and the `list-runs` CLI that reads them back.
+"""Per-run folders in `<RESULTS_FOLDER>/runs`, and the `list-runs` CLI that reads them back.
 
-Every `train-model` and `evaluate-models` run writes one log, named `<id>__<kind>__<flags>.log`:
+Every `train-model` and `evaluate-models` run gets its own folder, `<id>__<kind>__<flags>/`:
 
-    0007__train__model=unimol_datasets=challenge_seed=43.log
-    0008__eval__models=xgb+rf_split=butina.log
+    0007__train__model=unimol_datasets=challenge_seed=43/
+    0008__eval__models=xgb+rf_split=butina/
+        run.log
+        results.md
+        predictions.csv
 
 The id counts up from the highest one in the folder, `kind` is `train` or `eval`, and the flags are the ones that
-differ from their default (`key=value`, `+` between list items, a bare `key` for an on-switch). The log itself starts
+differ from their default (`key=value`, `+` between list items, a bare `key` for an on-switch). `run.log` starts
 with a header (full command, git commit, start time) and ends with a `# finished:` line holding status and duration.
+Everything else the run produces is written beside it, so a result never loses the log explaining how it was made.
+
+Logs written before run folders existed are flat `<id>__<kind>__<flags>.log` files; `list-runs` still reads those,
+and `list-runs --migrate` moves them into folders.
 """
 
 import argparse
@@ -35,7 +42,9 @@ from data_tools.paths import RESULTS_DIR
 
 RUNS_DIR = RESULTS_DIR / "runs"
 KINDS = ("train", "eval")
-_NAME = re.compile(r"^(\d+)__(train|eval)(?:__(.*))?\.log$")
+_NAME = re.compile(r"^(\d+)__(train|eval)(?:__(.*))?$")
+_FLAT_NAME = re.compile(r"^(\d+)__(train|eval)(?:__(.*))?\.log$")  # the pre-folder layout, still read by list-runs
+LOG_NAME = "run.log"
 _MAX_FLAGS = 150  # characters of flags kept in a filename; the full command is in the log header
 _END_OF_HEADER = "# ---"
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[_PX^][^\x1b]*\x1b\\")
@@ -62,21 +71,31 @@ def _value(value: object) -> str:
     return _clean(str(value))
 
 
-def _filename(run_id: int, kind: str, flags: Mapping[str, object]) -> str:
+def _dirname(run_id: int, kind: str, flags: Mapping[str, object]) -> str:
     body = "_".join(key if value is True else f"{key}={_value(value)}" for key, value in flags.items())
     if len(body) > _MAX_FLAGS:
         body = body[:_MAX_FLAGS].rsplit("_", 1)[0] + "_etc"
-    return f"{run_id:04d}__{kind}" + (f"__{body}" if body else "") + ".log"
+    return f"{run_id:04d}__{kind}" + (f"__{body}" if body else "")
+
+
+def _taken_ids(runs_dir: Path) -> list[int]:
+    """Run ids already used, in either the folder or the older flat layout."""
+    return [
+        int(m[1])
+        for p in runs_dir.iterdir()
+        if (m := (_NAME.match(p.name) if p.is_dir() else _FLAT_NAME.match(p.name)))
+    ]
 
 
 def _open_log(kind: str, flags: Mapping[str, object], runs_dir: Path):
-    """Create the next log file; the lock keeps parallel jobs from taking the same id."""
+    """Create the next run folder and open its log; the lock keeps parallel jobs from taking the same id."""
     runs_dir.mkdir(parents=True, exist_ok=True)
     with open(runs_dir / ".lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        ids = [int(m[1]) for p in runs_dir.glob("*.log") if (m := _NAME.match(p.name))]
-        run_id = max(ids, default=0) + 1
-        path = runs_dir / _filename(run_id, kind, flags)
+        run_id = max(_taken_ids(runs_dir), default=0) + 1
+        directory = runs_dir / _dirname(run_id, kind, flags)
+        directory.mkdir()
+        path = directory / LOG_NAME
         return run_id, path, open(path, "x", encoding="utf-8")
 
 
@@ -90,11 +109,16 @@ def _git_state() -> str:
 
 
 class RunLog:
-    """The open log of one run; set `code` to a nonzero exit code to mark the run failed."""
+    """The open log of one run; set `code` to a nonzero exit code to mark the run failed.
+
+    `dir` is the run's own folder: everything a run produces (tables, CSVs, plots) belongs in it,
+    so a run's output stays with the log that explains how it was made.
+    """
 
     def __init__(self, run_id: int, path: Path, handle) -> None:
         self.id = run_id
         self.path = path
+        self.dir = path.parent
         self.code: int | None = None
         self._handle = handle
         self._lock = threading.Lock()
@@ -204,6 +228,22 @@ class _Tee:
 
 
 @contextlib.contextmanager
+def clean_interrupt(what: str) -> Iterator[None]:
+    """Turn Ctrl-C into one line on stderr and exit code 130, instead of a traceback.
+
+    Wrap a CLI's body in this, outside `run_log`, so the run's own log still records the interrupt
+    before the process goes. The traceback it swallows is whatever numeric code happened to be running
+    when the signal landed, which says nothing about why the user pressed Ctrl-C.
+    """
+    try:
+        yield
+    except KeyboardInterrupt:
+        # The leading newline lands after a half-drawn progress bar.
+        print(f"\n{what} interrupted (Ctrl-C)", file=sys.stderr)
+        sys.exit(130)
+
+
+@contextlib.contextmanager
 def run_log(kind: str, flags: Mapping[str, object], header: Mapping[str, str] | None = None, runs_dir: Path | None = None) -> Iterator[RunLog]:
     """Log stdout and stderr of the enclosed block to the next `<id>__<kind>__<flags>.log` while still printing them."""
     run_id, path, handle = _open_log(kind, flags, runs_dir or RUNS_DIR)
@@ -277,8 +317,16 @@ def _display_flags(raw: str | None) -> str:
 
 
 def read_run(path: Path) -> RunInfo | None:
-    """Parse a log's filename, header and last line; None if the file is not a run log."""
-    match = _NAME.match(path.name)
+    """Parse a run's name, header and last line; None if it is not a run.
+
+    `path` is a run folder (holding run.log) or, in the older flat layout, the .log file itself.
+    """
+    if path.is_dir():
+        match, path = _NAME.match(path.name), path / LOG_NAME
+        if not path.is_file():
+            return None
+    else:
+        match = _FLAT_NAME.match(path.name)
     if not match:
         return None
     started = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
@@ -300,9 +348,32 @@ def read_run(path: Path) -> RunInfo | None:
 
 
 def list_runs(runs_dir: Path) -> list[RunInfo]:
-    """Every run log in the folder, newest first."""
-    runs = [info for p in runs_dir.glob("*.log") if (info := read_run(p))]
+    """Every run in the folder, newest first; run folders and older flat logs alike."""
+    if not runs_dir.is_dir():
+        return []
+    runs = [info for p in runs_dir.iterdir() if (info := read_run(p))]
     return sorted(runs, key=lambda r: r.id, reverse=True)
+
+
+def migrate_flat_logs(runs_dir: Path) -> list[tuple[Path, Path]]:
+    """Move each flat `<id>__<kind>__<flags>.log` into its own `<id>__<kind>__<flags>/run.log`.
+
+    Returns the (before, after) pairs moved. Skips a log whose folder already exists, so it is safe
+    to run twice.
+    """
+    moved = []
+    for path in sorted(runs_dir.glob("*.log")):
+        if not _FLAT_NAME.match(path.name):
+            continue
+        directory = path.with_suffix("")
+        if directory.exists():
+            print(f"Skipping {path.name}: {directory.name}/ already exists", file=sys.stderr)
+            continue
+        directory.mkdir()
+        target = directory / LOG_NAME
+        path.rename(target)
+        moved.append((path, target))
+    return moved
 
 
 def _table(runs: list[RunInfo]) -> str:
@@ -321,7 +392,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("-n", type=int, default=None, metavar="N", help="Only the newest N runs")
     parser.add_argument("--dir", type=Path, default=RUNS_DIR, help="Folder with the run logs (default: <RESULTS_FOLDER>/runs)")
     parser.add_argument("--tail", type=int, default=20, help="Lines of output shown for a single run (default: 20)")
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Move logs written in the old flat layout into their own run folder (0001__eval__x.log becomes "
+        "0001__eval__x/run.log) and exit. Safe to run twice; leaves folders that already exist alone",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.migrate:
+        moved = migrate_flat_logs(args.dir)
+        print(f"Moved {len(moved)} log(s) into run folders in {args.dir}")
+        return
 
     runs = list_runs(args.dir)
     if args.run_id is not None:

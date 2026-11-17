@@ -25,11 +25,13 @@ import copy
 import sys
 
 from data_tools.merge_datasets import describe
-from models.run_log import changed_flags, run_log
+from models.run_log import changed_flags, clean_interrupt, run_log
 from models.training import BACKENDS
 from models.training.common import add_common_arguments, slug
 
 _SWEPT = {"parser", "model", "seed", "seeds", "n_seeds", "datasets", "learning_rate"}  # set per run, not per command
+# Output paths say where a run's files went, not what it trained, so they stay out of the run folder's name.
+_UNNAMED_FLAGS = {"output_dir", "data_dir"}
 _CHALLENGE = "challenge"  # the scored heads: trained on only when listed, always loaded for the split
 
 
@@ -39,6 +41,12 @@ def _as_list(value) -> list:
 
 def main(argv: list[str] | None = None, model: str | None = None) -> None:
     """Entry point for the train-model CLI (`model` pins the backend for the legacy aliases)."""
+    with clean_interrupt("train-model"):
+        _train(argv, model)
+
+
+def _train(argv: list[str] | None, model: str | None) -> None:
+    """Parse the arguments and run every (datasets x learning rate x variant x seed) combination."""
     argv = sys.argv[1:] if argv is None else argv
     if model is None:
         pre = argparse.ArgumentParser(add_help=False)
@@ -79,7 +87,7 @@ def main(argv: list[str] | None = None, model: str | None = None) -> None:
     runs = [(group, lr, variant, seed) for group in args.datasets or [None] for lr in lrs for variant in variants for seed in seeds]
     failed = []
     for index, (group, lr, variant, seed) in enumerate(runs, 1):
-        flags = {"model": model, **changed_flags(args, parser, skip=_SWEPT)}
+        flags = {"model": model, **changed_flags(args, parser, skip=_SWEPT | _UNNAMED_FLAGS)}
         if group is not None:
             flags["datasets"] = slug(group)
         if lr is not None and lr not in _as_list(parser.get_default("learning_rate")):
@@ -102,9 +110,12 @@ def main(argv: list[str] | None = None, model: str | None = None) -> None:
             tag = "_".join(f"{k}{v}" for k, v in variant.items())
             if tag:
                 run.run_label = f"{run.run_label}_{tag}"
-            if len(runs) > 1:
-                base = args.output_dir or backend.results_dir
-                run.output_dir = base / run.run_label / f"seed{seed}"
+            # Each run has its own run folder, so its checkpoints and metrics go there beside the log
+            # that explains them. An explicit --output-dir still wins, and still lays a sweep out by config.
+            if args.output_dir is None:
+                run.output_dir = log.dir
+            elif len(runs) > 1:
+                run.output_dir = args.output_dir / run.run_label / f"seed{seed}"
             backend.validate(run, parser)
             print(f"\n##### run {index}/{len(runs)}: {run.run_label}{f' lr {lr}' if lr is not None else ''}{f' {variant}' if variant else ''} seed {seed}", file=sys.stderr)
             code = log.code = backend.run(run, extra)

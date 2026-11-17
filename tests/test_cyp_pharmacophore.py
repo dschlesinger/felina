@@ -298,6 +298,7 @@ def test_preexisting_registry_order_is_unchanged():
         "atom_jepa", "atom_jepa_bio",
         "cyp_heme_v2", "cyp_isoform_v2", "cyp_tdi_v2", "erg",
         "xtb_solv_v1", "xtb_elec_v1", "cyp_mech_v1", "monroe",
+        "avalon", "count_avalon",
     ]
 
 

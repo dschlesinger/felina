@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-PLOT_KINDS = ["train-test", "heldout-skew"]
+PLOT_KINDS = ["train-test", "heldout-skew", "affine"]
 
 
 def _slug(text: str) -> str:
@@ -61,7 +61,47 @@ def draw_heldout_skew(ax, title: str, r: dict, compact: bool = False) -> None:
     ax.legend(loc="lower right", frameon=False, fontsize=7 if compact else 10)
 
 
-_DRAW = {"train-test": draw_train_test, "heldout-skew": draw_heldout_skew}
+def draw_affine(ax, title: str, r: dict, compact: bool = False) -> None:
+    """Out-of-fold predictions before and after affine recalibration, against the truth they were fitted on.
+
+    The grey points are what the model predicted on the folds it was held out of; the coloured ones are the
+    same points after `y = slope * prediction + intercept`. A slope below one pulls the predictions in toward
+    their mean and above one spreads them out.
+
+    The two solid lines are each cloud's own trend. Note that shrinking (slope < 1) makes the trend *flatter*,
+    further from the dashed y = x, while still lowering the error: least squares buys accuracy by hedging
+    toward the mean, which is a different thing from agreeing with the truth one-for-one. Both MAEs are shown,
+    so an adjustment that buys nothing is visible.
+    """
+    y, raw, cal = r["y_oof"], r["pred_oof"], r["pred_oof_cal"]
+    slope, intercept = r["affine"]
+    lo = min(y.min(), raw.min(), cal.min()) - 0.2
+    hi = max(y.max(), raw.max(), cal.max()) + 0.2
+    size = 9 if compact else 16
+    ax.scatter(y, raw, s=size, alpha=0.3, color="tab:gray", label=f"out-of-fold (MAE {np.abs(raw - y).mean():.3f})")
+    ax.scatter(y, cal, s=size, alpha=0.5, color="tab:blue", label=f"recalibrated (MAE {np.abs(cal - y).mean():.3f})")
+    ax.plot([lo, hi], [lo, hi], "k--", lw=1, label="y = x")
+    # The clouds overlap almost entirely, so the trend lines are what make the adjustment visible.
+    if len(y) > 1 and np.ptp(y) > 0:
+        xs = np.array([lo, hi])
+        for values, colour in ((raw, "tab:gray"), (cal, "tab:blue")):
+            a, b = np.polyfit(y, values, 1)
+            ax.plot(xs, a * xs + b, color=colour, lw=1.6)
+    ax.text(
+        0.04, 0.96, f"slope {slope:.3f}\nintercept {intercept:+.3f}\n"
+        + ("shrinks spread" if slope < 1 else "stretches spread" if slope > 1 else "unchanged"),
+        transform=ax.transAxes, va="top", fontsize=7 if compact else 9,
+        bbox={"boxstyle": "round", "fc": "w", "alpha": 0.8},
+    )
+    ax.set(xlim=(lo, hi), ylim=(lo, hi), title=title, xlabel="Experimental pIC50", ylabel="Predicted pIC50")
+    ax.set_aspect("equal", adjustable="box")
+    ax.legend(loc="lower right", frameon=False, fontsize=7 if compact else 9)
+
+
+_DRAW = {"train-test": draw_train_test, "heldout-skew": draw_heldout_skew, "affine": draw_affine}
+
+# What a row must carry for a kind to be drawable at all (other kinds need only the validation predictions).
+_NEEDS = {"train-test": "pred_blind", "affine": "pred_oof_cal"}
 
 
 def _select(rows: list[dict]) -> list[dict]:
@@ -73,10 +113,10 @@ def _select(rows: list[dict]) -> list[dict]:
 def _grid(rows: list[dict], kind: str = "") -> tuple[list[str], list[tuple[str, str]], dict]:
     """Isoform columns, (model, input) rows, and the (model, input, isoform) -> row lookup.
 
-    For train-test, rows without blind-set predictions are left out.
+    Rows missing what a kind needs (blind-set predictions, recalibrated out-of-fold ones) are left out.
     """
-    if kind == "train-test":
-        rows = [r for r in rows if r.get("pred_blind") is not None]
+    if kind in _NEEDS:
+        rows = [r for r in rows if r.get(_NEEDS[kind]) is not None]
     isoforms = list(dict.fromkeys(r["target"] for r in rows))
     combos = list(dict.fromkeys((r["name"], r["input"]) for r in rows))
     return isoforms, combos, {(r["name"], r["input"], r["target"]): r for r in rows}
@@ -89,7 +129,7 @@ def write_files(kinds: list[str], rows: list[dict], out_dir: Path) -> list[Path]
     for r in _select(rows):
         isoform = r["target"].split("_")[0]
         for kind in kinds:
-            if kind == "train-test" and r.get("pred_blind") is None:
+            if kind in _NEEDS and r.get(_NEEDS[kind]) is None:
                 continue
             path = out_dir / f"{kind}_{_slug(isoform)}_{_slug(r['name'])}_{_slug(r['input'])}.png"
             fig, ax = plt.subplots(figsize=(7, 4.5) if kind == "train-test" else (6, 6))
@@ -230,11 +270,18 @@ def show_terminal(kinds: list[str], rows: list[dict]) -> str:
 # --- from saved results ---------------------------------------------------------------------------------------
 
 
+_MISSING = {
+    "train-test": "no blind-set predictions for these results",
+    "affine": "no recalibrated out-of-fold predictions for these results (needs --nfolds)",
+}
+
+
 def usable_kinds(kinds: list[str], rows: list[dict]) -> list[str]:
-    """Drop train-test (with a note) where there are no blind-set predictions to plot."""
-    if "train-test" in kinds and not any(r["pred_blind"] is not None for r in rows):
-        print("train-test skipped: no blind-set predictions for these results", file=sys.stderr)
-        return [k for k in kinds if k != "train-test"]
+    """Drop the kinds (with a note) whose rows lack the predictions they need."""
+    for kind, why in _MISSING.items():
+        if kind in kinds and not any(r.get(_NEEDS[kind]) is not None for r in rows):
+            print(f"{kind} skipped: {why}", file=sys.stderr)
+            kinds = [k for k in kinds if k != kind]
     return kinds
 
 

@@ -20,6 +20,7 @@ from representations.foundation_alias import ensure_aliases
 from representations.unimol import cache_name as unimol_cache_name
 from representations.atom_jepa import cache_name as atom_jepa_cache_name
 from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
+from models.run_log import clean_interrupt
 
 _MODEL_CHARS = 10
 
@@ -207,6 +208,12 @@ def _generate_pretrained(names: list[str], data_dir: Path, cache_dir: Path) -> i
 
 def main() -> None:
     """Entry point for the foundation-model CLI."""
+    with clean_interrupt("foundation-model"):
+        _run()
+
+
+def _run() -> None:
+    """Parse the arguments and do the requested work."""
     parser = argparse.ArgumentParser(
         description="Manage trained foundation models. Looks in "
         + ", ".join(f"${k.home_env} for {k.name} (default {k.default_home})" for k in KINDS.values())

@@ -15,6 +15,7 @@ from representations.chemprop_weights import ChempropWeights, cache_name, cache_
 from representations.rdkit_descriptors import RDKitDescriptors
 from representations.morgan import CountMorganFingerprint, MorganFingerprint
 from representations.maccs import MACCS
+from representations.avalon import AvalonFingerprint, CountAvalonFingerprint
 from representations.mordred import MordredDescriptors
 from representations.cyp_pharmacophore import (
     ErGFingerprint,
@@ -40,6 +41,8 @@ _chemeleon = CheMeleon()
 _morgan = MorganFingerprint()
 _count_morgan = CountMorganFingerprint()
 _maccs = MACCS()
+_avalon = AvalonFingerprint()
+_count_avalon = CountAvalonFingerprint()
 _mordred = MordredDescriptors()
 _shape = ShapeDescriptors()
 _unimol = UniMol()
@@ -91,6 +94,14 @@ def _count_morgan_features(df: pl.DataFrame) -> np.ndarray:
 
 def _maccs_features(df: pl.DataFrame) -> np.ndarray:
     return _maccs.transform(df["SMILES"])
+
+
+def _avalon_features(df: pl.DataFrame) -> np.ndarray:
+    return _avalon.transform(df["SMILES"])
+
+
+def _count_avalon_features(df: pl.DataFrame) -> np.ndarray:
+    return _count_avalon.transform(df["SMILES"])
 
 
 def _mordred_features(df: pl.DataFrame) -> np.ndarray:
@@ -148,6 +159,9 @@ INPUT_REGISTRY: dict[str, Callable[[pl.DataFrame], np.ndarray]] = {
     _cyp_mech.name: _cyp_mech_features,
     # --- Monroe GRIT foundation model (3D; checkpoint downloads on first use) ---
     _monroe.name: _monroe_features,
+    # --- RDKit Avalon fingerprints ---
+    _avalon.name: _avalon_features,
+    _count_avalon.name: _count_avalon_features,
 }
 
 

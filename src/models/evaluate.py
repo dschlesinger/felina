@@ -28,10 +28,12 @@ from data_tools.load import cv_folds, load_data
 from models import REGISTRY, CYPModel, dimred
 from models.TabPFN import WIDE_FEATURES as _TABPFN_WIDE
 from models.caruana import fit_caruana_weights
+from models.center_spread import center_spread, load_targets
 from models.plots import PLOT_KINDS, show_terminal, write_files
-from models.run_log import changed_flags, print_split, run_log
+from models.recalibrate import apply_affine, recalibrate
+from models.run_log import changed_flags, clean_interrupt, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
-from data_tools.paths import DATA_DIR, FEATURE_DIR, RESULTS_DIR
+from data_tools.paths import DATA_DIR, FEATURE_DIR
 
 _CYP_TARGETS = [
     "CYP1A2_pIC50_direct_inhibition",
@@ -138,6 +140,37 @@ def _write_predictions(path: Path, rows: list[dict[str, object]]) -> None:
         raise OSError(f"Cannot write predictions CSV to {path}: {exc}") from exc
 
 
+_AFFINE_COLUMNS = ["isoform", "model", "input", "split", "seed", "n_oof", "slope", "intercept"]
+
+# One row per molecule per fitted model: role says whether that model was fitted on the molecule ("fit")
+# or held out of it ("holdout"). The holdout rows are what a post-hoc affine recalibration is fitted on.
+_MEMBER_COLUMNS = ["smiles", "isoform", "model", "input", "seed", "fold", "role", "y_true", "y_pred"]
+
+
+def _write_members(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write every fitted model's predictions on its own fit and held-out rows to a new CSV."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=_MEMBER_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+    except OSError as exc:
+        raise OSError(f"Cannot write member predictions CSV to {path}: {exc}") from exc
+
+
+def _write_affine(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write the fitted affine maps to a new CSV, refusing to overwrite."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=_AFFINE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+    except OSError as exc:
+        raise OSError(f"Cannot write affine recalibration CSV to {path}: {exc}") from exc
+
+
 def _write_folds(path: Path, train_df: pl.DataFrame, folds: np.ndarray) -> None:
     """Write each training molecule's fold to a new CSV, refusing to overwrite."""
     try:
@@ -148,6 +181,36 @@ def _write_folds(path: Path, train_df: pl.DataFrame, folds: np.ndarray) -> None:
             ).write_csv(stream)
     except OSError as exc:
         raise OSError(f"Cannot write folds CSV to {path}: {exc}") from exc
+
+
+# An output flag given with no value writes the run folder's default name for that output.
+IN_RUN_DIR = Path("@run")
+# Output paths say where a run's files went, not what the experiment was, so they stay out of the folder name.
+_UNNAMED_FLAGS = frozenset({
+    "predictions_out", "folds_out", "output_md", "plots_dir", "affine_out", "member_predictions_out",
+    "cache_dir", "data_dir",
+})
+
+
+def _recentred(out: dict, mean: float, std: float, y_len: int, folds: np.ndarray | None) -> dict:
+    """One prediction set mapped onto `mean` and `std`: validation and blind rows on their own spread,
+    the cross-validation folds together on the pooled out-of-fold spread."""
+    holdout = out["holdout"]
+    if holdout and folds is not None:
+        pooled = _oof_pooled(holdout, folds, y_len)
+        holdout = {k: center_spread(pred, mean, std, source=pooled) for k, pred in holdout.items()}
+    return {
+        "val": center_spread(out["val"], mean, std),
+        "blind": None if out["blind"] is None else center_spread(out["blind"], mean, std),
+        "holdout": holdout,
+    }
+
+
+def _resolve_out(value: Path | None, run_dir: Path, name: str) -> Path | None:
+    """Where an output flag writes: the path it was given, or `name` inside the run folder when given bare."""
+    if value is None:
+        return None
+    return run_dir / name if value == IN_RUN_DIR else value
 
 
 _MIN_LABEL_WIDTH = 4
@@ -233,8 +296,8 @@ def _fold_views(
     for k in ([None] if folds is None else np.unique(folds).tolist()):
         fit_rows = np.ones(len(y_train), dtype=bool) if k is None else folds != k
         view = {
-            "k": k, "y_fit": y_train[fit_rows], "X_fit": X_train[fit_rows], "X_val": X_val, "X_blind": X_blind,
-            "X_holdout": None if k is None else X_train[folds == k],
+            "k": k, "fit_rows": fit_rows, "y_fit": y_train[fit_rows], "X_fit": X_train[fit_rows],
+            "X_val": X_val, "X_blind": X_blind, "X_holdout": None if k is None else X_train[folds == k],
         }
         if reduce is not None:
             reducer = reduce(view["X_fit"], view["y_fit"])
@@ -255,6 +318,7 @@ def _fit_members(
     seeds: list[int | None],
     progress: tqdm | None = None,
     views: list[dict] | None = None,
+    collect: Callable[[int | None, dict, np.ndarray, np.ndarray | None], None] | None = None,
 ) -> dict:
     """Fit one model per (seed, fold) and collect what each predicts.
 
@@ -263,6 +327,10 @@ def _fit_members(
     default; models without a `random_state` argument are fit once, since seeds can't differ.
     `progress` ticks once per fitted model. `views` (from _fold_views) replaces the matrices
     derived from X_train/X_val/X_blind/folds, e.g. to fit on per-fold reduced features.
+
+    `collect(seed, view, fit_predictions, holdout_predictions)` is called once per fitted model with what it
+    predicts on the rows it was fitted on and on the fold it was held out of. Predicting on the fit rows is
+    extra inference, so it only happens when a collector asks for it.
     """
     seeds = _effective_seeds(cls, seeds)
     views = views if views is not None else _fold_views(X_train, y_train, X_val, X_blind, folds)
@@ -274,8 +342,12 @@ def _fit_members(
             members["val"].append(model.predict(view["X_val"]))
             if view["X_blind"] is not None:
                 members["blind"].append(model.predict(view["X_blind"]))
+            holdout = None
             if view["k"] is not None:
-                members["holdout"].setdefault(view["k"], []).append(model.predict(view["X_holdout"]))
+                holdout = model.predict(view["X_holdout"])
+                members["holdout"].setdefault(view["k"], []).append(holdout)
+            if collect is not None:
+                collect(seed, view, model.predict(view["X_fit"]), holdout)
             if progress is not None:
                 progress.update()
     return members
@@ -634,6 +706,22 @@ def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
     _print(table)
 
 
+def _print_affine(log: list[dict[str, object]]) -> None:
+    """Print the slope and intercept of the affine recalibration applied to each prediction set."""
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title="Affine recalibration", title_style="bold")
+    for column, justify in (("target", "left"), ("model", "left"), ("input", "left"), ("n_oof", "right"),
+                            ("slope", "right"), ("intercept", "right")):
+        table.add_column(column, justify=justify, overflow="fold")
+    for row in log:
+        table.add_row(
+            escape(str(row["isoform"]).replace("_pIC50_direct_inhibition", "")),
+            escape(str(row["model"])), escape(_short(str(row["input"]))), str(row["n_oof"]),
+            f"{row['slope']:.3f}", f"{row['intercept']:+.3f}",
+        )
+    console.print()
+    console.print(table)
+
+
 def _print_stacks(reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]]) -> None:
     """Print each stacker's per-model weights; share is the weight over the sum of absolute weights."""
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title_style="bold", padding=(0, 1), pad_edge=False)
@@ -763,6 +851,40 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting")
     parser.add_argument(
+        "--affine-recalibration",
+        action="store_true",
+        help="Recalibrate every prediction set (each model and ensemble) with y = slope * prediction + intercept, "
+        "fitted by least squares on the out-of-fold predictions of the training portion and applied once to the "
+        "validation and blind rows (Platt-style linear recalibration; see models/recalibrate.py). Cross-validation "
+        "metrics use a map fitted on the other folds only. Requires --nfolds",
+    )
+    parser.add_argument(
+        "--member-predictions-out", type=Path, nargs="?", const=IN_RUN_DIR, default=None,
+        help="Write every fitted model's predictions on the rows it was fitted on (role=fit) and on the fold it "
+        "was held out of (role=holdout) to a CSV, per model, input, isoform, seed and fold, so an affine "
+        "recalibration (or any other post-processing) can be fitted afterwards without refitting. Bare, it writes "
+        "member_predictions.csv in the run folder; with a path, there. Needs --nfolds, and predicting on the fit "
+        "rows is extra inference",
+    )
+    parser.add_argument(
+        "--center-spread",
+        type=Path,
+        default=None,
+        metavar="CSV",
+        help="Recentre and rescale every prediction set onto a target mean and standard deviation per isoform, "
+        "read from a CSV with the columns isoform,mean,std (isoform as 3A4 or the full target column). Each set is "
+        "mapped so it carries exactly that mean and spread; the cross-validation folds share the pooled "
+        "out-of-fold scaling. The transformed predictions are what the run exports, and each model is also scored "
+        "untransformed for comparison. Cannot be combined with --affine-recalibration",
+    )
+    parser.add_argument(
+        "--affine-out",
+        type=Path,
+        help="Where to write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept). "
+        "With --affine-recalibration they are always written: by default to affine.csv in the run folder, which this "
+        "flag redirects. Creates parents, refuses existing files",
+    )
+    parser.add_argument(
         "--butina-cutoff",
         type=float,
         default=0.4,
@@ -800,9 +922,9 @@ def main() -> None:
         "--nfolds or --nseeds is used",
     )
     parser.add_argument(
-        "--folds-out", type=Path,
-        help="Write the --nfolds fold of every training molecule to a new CSV (use results/); "
-        "creates parents, refuses existing files",
+        "--folds-out", type=Path, nargs="?", const=IN_RUN_DIR,
+        help="Write the --nfolds fold of every training molecule to a CSV. Bare, it writes folds.csv in the "
+        "run folder; with a path, there. Creates parents, refuses existing files",
     )
     parser.add_argument(
         "--no-cv-deduplication",
@@ -859,8 +981,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-md", type=Path, default=None,
-        help="Also write full-name result tables (and the correlation matrices if --correlation is set) to this "
-        "markdown file; unlike the console tables, names are never truncated to the terminal width",
+        help="Where to write the full-name result tables (and the correlation matrices if --correlation is set). "
+        "They are always written: by default to results.md in the run folder, which this flag redirects. Unlike "
+        "the console tables, names are never truncated to the terminal width",
     )
     parser.add_argument(
         "--dimred",
@@ -876,14 +999,15 @@ def main() -> None:
     parser.add_argument("--cache-dir", default=FEATURE_DIR, help="Directory for cached feature matrices")
     parser.add_argument("--sort-by", default="MAE", choices=_METRICS, help="Metric to sort results by")
     parser.add_argument(
-        "--predictions-out", type=Path,
-        help="Write validation predictions to a new CSV (use results/); creates parents, refuses existing files",
+        "--predictions-out", type=Path, nargs="?", const=IN_RUN_DIR,
+        help="Write validation predictions to a CSV (and blind predictions to a .blind.csv sibling). Bare, it "
+        "writes predictions.csv in the run folder; with a path, there. Creates parents, refuses existing files",
     )
     parser.add_argument(
         "--predict-blind",
         action="store_true",
         help="Also predict the blinded test set (data/test.csv) with each fitted model and write one CSV per "
-        "(model, input) to results/<model>_<input>_blind_predictions.csv. Models are fit on the train split only.",
+        "(model, input) to <run folder>/<model>_<input>_blind_predictions.csv. Models are fit on the train split only.",
     )
     parser.add_argument(
         "--unblinded",
@@ -913,14 +1037,22 @@ def main() -> None:
         "Uses inline images (kitty, WezTerm, ghostty, iTerm2) and falls back to text plots (plotext), "
         "wrapped to the terminal width, anywhere else",
     )
-    parser.add_argument("--plots-dir", type=Path, default=RESULTS_DIR / "plots", help="Directory for --plots output")
+    parser.add_argument("--plots-dir", type=Path, default=None, help="Directory for --plots output (default: plots/ in the run folder)")
     args = parser.parse_args()
-    with run_log("eval", changed_flags(args, parser)):
-        _run(parser, args)
+    with clean_interrupt("evaluate-models"), run_log("eval", changed_flags(args, parser, skip=_UNNAMED_FLAGS)) as log:
+        # Everything this run writes lands in its own folder unless a flag names somewhere else.
+        args.predictions_out = _resolve_out(args.predictions_out, log.dir, "predictions.csv")
+        args.folds_out = _resolve_out(args.folds_out, log.dir, "folds.csv")
+        args.output_md = _resolve_out(args.output_md or IN_RUN_DIR, log.dir, "results.md")
+        if args.affine_recalibration:
+            args.affine_out = _resolve_out(args.affine_out or IN_RUN_DIR, log.dir, "affine.csv")
+        args.member_predictions_out = _resolve_out(args.member_predictions_out, log.dir, "member_predictions.csv")
+        args.plots_dir = args.plots_dir or log.dir / "plots"
+        _run(parser, args, log.dir)
 
 
-def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Evaluate the models for parsed arguments."""
+def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Path) -> None:
+    """Evaluate the models for parsed arguments, writing this run's files into `run_dir`."""
     args.input = args.input or [["rdkit"]]
 
     if args.targets is not None and args.isoforms is not None:
@@ -940,10 +1072,35 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         parser.error("--cv-filter none cannot be combined with other filters")
     if args.cv_filter not in (None, ["none"]) and args.nfolds is None:
         parser.error("--cv-filter requires --nfolds")
+    if args.affine_recalibration and args.nfolds is None:
+        parser.error("--affine-recalibration requires --nfolds (it is fitted on out-of-fold predictions)")
+    if args.center_spread is not None and args.affine_recalibration:
+        parser.error(
+            "--center-spread and --affine-recalibration are competing calibrations: moment matching sets the "
+            "mean and spread outright, so whatever the affine map did to them is overwritten. Pick one"
+        )
+    if "affine" in (args.plots or []) and args.nfolds is None:
+        parser.error("--plots affine requires --nfolds (the map it draws is fitted on out-of-fold predictions)")
+    if args.affine_out is not None and not args.affine_recalibration:
+        parser.error("--affine-out requires --affine-recalibration (there are no fitted maps to write otherwise)")
     if args.plots_terminal and not args.plots:
         parser.error("--plots-terminal requires --plots")
+    centre_targets: dict[str, tuple[float, float]] = {}
+    if args.center_spread is not None:
+        try:
+            centre_targets = load_targets(args.center_spread)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    # Per-member predictions need folds: without them nothing is ever held out to recalibrate on.
+    save_members = args.member_predictions_out is not None
+    # Recalibrating always draws its own plot; asking for the plot fits the map without applying it.
+    plot_kinds = list(dict.fromkeys((args.plots or []) + (["affine"] if args.affine_recalibration else [])))
+    fit_affine_maps = args.affine_recalibration or "affine" in plot_kinds
     if args.nseeds < 1:
         parser.error(f"--nseeds must be >= 1, got {args.nseeds}")
+    if args.member_predictions_out is not None and args.nfolds is None:
+        parser.error("--member-predictions-out requires --nfolds (without folds nothing is held out to refit on)")
     if args.folds_out is not None and args.nfolds is None:
         parser.error("--folds-out requires --nfolds")
     if args.ensemble in _STACKERS and args.nfolds is None:
@@ -1001,6 +1158,22 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.folds_out is not None and args.folds_out.exists():
         print(
             f"Cannot write folds CSV to {args.folds_out}: file already exists "
+            "(checked before training; choose a new path or delete it)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if save_members and args.member_predictions_out.exists():
+        print(
+            f"Cannot write member predictions CSV to {args.member_predictions_out}: file already exists "
+            "(checked before training; choose a new path or delete it)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.affine_out is not None and args.affine_out.exists():
+        print(
+            f"Cannot write affine recalibration CSV to {args.affine_out}: file already exists "
             "(checked before training; choose a new path or delete it)",
             file=sys.stderr,
         )
@@ -1081,6 +1254,10 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     plot_rows: list[dict] = []
     stack_reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]] = []
     filter_log: list[dict] = []
+    # one _AFFINE_COLUMNS row per recalibrated prediction set
+    affine_log: list[dict[str, object]] = []
+    member_rows: list[dict[str, object]] = []
+    uncentred: set[str] = set()
     # target -> (model, input) -> {val row index: prediction}
     corr_preds: dict[str, dict[tuple[str, str], dict[int, float]]] = {}
     # (model, input) -> target -> prediction per blind row
@@ -1090,8 +1267,59 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     target_data: dict[str, dict] = {}
     misaligned: set[str] = set()
 
+    def _score_only(target: str, name: str, input_label: str, out: dict, data: dict) -> None:
+        """Queue one prediction set for the printed result tables alone, exporting and plotting nothing."""
+        results.append((target, name, input_label, {
+            **_compute_metrics(
+                pl.Series("actual", data["y_val"].tolist()), pl.Series("prediction", out["val"].tolist()),
+            ),
+            "n_train": len(data["y_train"]), "n_val": len(data["y_val"]),
+        }))
+        if data["fold_ids"] is not None:
+            cv_results.append((target, name, input_label, _cv_metrics(out["holdout"], data["y_train"], data["fold_ids"])))
+        if unblinded_labels and out["blind"] is not None:
+            actual = unblinded_labels[target]
+            predicted = np.asarray(out["blind"], dtype=float)
+            scored = np.isfinite(actual) & np.isfinite(predicted)
+            if scored.any():
+                unblinded_results.append((target, name, input_label, {
+                    **_compute_metrics(
+                        pl.Series("actual", actual[scored].tolist()),
+                        pl.Series("prediction", predicted[scored].tolist()),
+                    ),
+                    "n_train": len(data["y_train"]), "n_val": int(scored.sum()),
+                }))
+
     def record(target: str, name: str, input_label: str, out: dict, data: dict) -> None:
         """Score one prediction set on the validation rows and queue it for the printed and exported results."""
+        affine = None
+        if fit_affine_maps and data["fold_ids"] is not None:
+            # The affine plot shows what the map does, so it is fitted for the plot alone too; only
+            # --affine-recalibration lets it through to the scored predictions.
+            raw_oof = _oof_pooled(out["holdout"], data["fold_ids"], len(data["y_train"]))
+            calibrated, affine = recalibrate(out, data["y_train"], data["fold_ids"])
+            if args.affine_recalibration:
+                # Both versions are scored, so the tables show what the map bought (or cost); everything
+                # else a run exports uses the recalibrated one.
+                _score_only(target, name, input_label, out, data)
+                name = f"{name} [affine]"
+                out = calibrated
+                # n_oof is how many out-of-fold rows the map was fitted on: a small one is a noisy slope.
+                affine_log.append(dict(zip(_AFFINE_COLUMNS, (
+                    target, name, input_label, args.split, args.seed, len(data["y_train"]), *affine,
+                ))))
+        if centre_targets:
+            if target not in centre_targets:
+                if target not in uncentred:  # once per target, not once per model and input
+                    uncentred.add(target)
+                    print(
+                        f"No centre/spread for {target} in {args.center_spread}: leaving it untransformed",
+                        file=sys.stderr,
+                    )
+            else:
+                _score_only(target, name, input_label, out, data)
+                name = f"{name} [centered]"
+                out = _recentred(out, *centre_targets[target], len(data["y_train"]), data["fold_ids"])
         predictions = out["val"]
         y_val = data["y_val"]
         metrics = _compute_metrics(pl.Series("actual", y_val.tolist()), pl.Series("prediction", predictions.tolist()))
@@ -1106,11 +1334,16 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                 )))
                 for smiles, actual, pred in zip(data["val_smiles"], y_val, predictions)
             )
-        if args.plots:
+        if plot_kinds:
             plot_rows.append({
                 "target": target, "name": name, "input": input_label, "is_ensemble": name.startswith("ensemble["),
                 "y_train": data["y_train"], "y_val": y_val, "pred_val": np.asarray(predictions, dtype=float),
                 "pred_blind": None if out["blind"] is None else np.asarray(out["blind"], dtype=float),
+                # The affine plot needs the out-of-fold predictions the map was fitted on, before and after it.
+                "y_oof": None if affine is None else data["y_train"],
+                "pred_oof": None if affine is None else raw_oof,
+                "pred_oof_cal": None if affine is None else apply_affine(raw_oof, *affine),
+                "affine": affine,
             })
         if unblinded_labels and out["blind"] is not None:
             actual = unblinded_labels[target]
@@ -1183,6 +1416,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                 )
                 val_index = np.flatnonzero(val_mask)
                 val_smiles = val_df["SMILES"].to_numpy()[val_mask] if args.predictions_out is not None else None
+                train_smiles = train_df["SMILES"].to_numpy()[train_mask]
                 fold_ids = None if folds is None else folds[train_mask]
                 data = {
                     "y_train": y_train, "y_val": y_val, "fold_ids": fold_ids, "train_mask": train_mask,
@@ -1195,9 +1429,28 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                     misaligned.add(target)
                 # Reduced once per target and fold, then shared by every model class and seed.
                 views = _fold_views(X_train, y_train, X_val, blind_features, fold_ids, reduce)
+
+                def collector(model_name: str):
+                    """Queue one CSV row per molecule for a fitted model, on its fit rows and its held-out fold."""
+                    def collect(seed, view, fit_predictions, holdout_predictions) -> None:
+                        groups = [("fit", np.flatnonzero(view["fit_rows"]), fit_predictions)]
+                        if holdout_predictions is not None:
+                            groups.append(("holdout", np.flatnonzero(~view["fit_rows"]), holdout_predictions))
+                        for role, rows_index, predicted in groups:
+                            member_rows.extend(
+                                dict(zip(_MEMBER_COLUMNS, (
+                                    train_smiles[i], target, model_name, input_label,
+                                    "" if seed is None else seed, view["k"], role,
+                                    float(y_train[i]), float(pred),
+                                )))
+                                for i, pred in zip(rows_index, predicted)
+                            )
+                    return collect
+
                 collapsed = [
                     (cls.name, _collapse([_fit_members(
                         cls, X_train, y_train, X_val, blind_features, fold_ids, seeds, progress, views=views,
+                        collect=collector(cls.name) if save_members else None,
                     )], member_method))
                     for cls in model_classes
                 ]
@@ -1235,12 +1488,12 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
 
     progress.close()
     if plot_rows:
-        written = write_files(args.plots, plot_rows, args.plots_dir)
+        written = write_files(plot_kinds, plot_rows, args.plots_dir)
         print(f"Wrote {len(written)} plots to {args.plots_dir}", file=sys.stderr)
         if args.plots_terminal:
-            show_terminal(args.plots, plot_rows)
+            show_terminal(plot_kinds, plot_rows)
     if args.predict_blind:
-        out_dir = RESULTS_DIR
+        out_dir = run_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         for (name, input_label), by_target in blind_preds.items():
             path = out_dir / f"{re.sub(r'[^\w+.-]', '_', name)}_{re.sub(r'[^\w+.-]', '_', input_label.replace(' + ', '+'))}_blind_predictions.csv"
@@ -1264,6 +1517,22 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
                 sys.exit(1)
             print(f"Wrote {len(blind_rows)} blind predictions to {_blind_path(args.predictions_out)}", file=sys.stderr)
 
+    if member_rows:
+        try:
+            _write_members(args.member_predictions_out, member_rows)
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Wrote {len(member_rows)} member predictions to {args.member_predictions_out}", file=sys.stderr)
+
+    if affine_log:
+        try:
+            _write_affine(args.affine_out, affine_log)
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"Wrote {len(affine_log)} affine recalibration maps to {args.affine_out}", file=sys.stderr)
+
     reverse = not _LOWER_IS_BETTER[args.sort_by]
 
     def _sort_key(r: tuple[str, str, str, dict[str, float]]) -> tuple[str, float]:
@@ -1277,10 +1546,12 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
         + escape(_short(" | ".join(" + ".join(g) for g in args.input)))
         + f"  [dim]split[/]={args.split}  [dim]seed[/]={args.seed}"
         + (f"  [dim]dimred[/]={escape(' '.join(args.dimred))}" if args.dimred else "")
+        + (f"  [dim]center-spread[/]={escape(args.center_spread.name)}" if args.center_spread else "")
         + (f"  [dim]nseeds[/]={args.nseeds}" if args.nseeds > 1 else "")
         + (f"  [dim]ensemble[/]={method}" if ensembling else "")
         + (f"  [dim]cv-filter[/]={'+'.join(filters)}" if filters else "")
         + ("  [dim]cv-dedup[/]=on" if dedup else "")
+        + ("  [dim]affine-recalibration[/]=on" if args.affine_recalibration else "")
     )
     _print_results(results, args.sort_by)
     if unblinded_results:
@@ -1298,6 +1569,8 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
             "  [dim](metrics averaged over held-out folds of the training portion)[/]"
         )
         _print_results(cv_results, args.sort_by)
+    if affine_log:
+        _print_affine(affine_log)
     if filter_log:
         _print_filter_log(filter_log, filters, dedup)
     if stack_reports:

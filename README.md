@@ -151,10 +151,32 @@ motif-report         # generate reports/pharmacophore_features.md from the pharm
 list-runs            # previous train-model / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
 ```
 
-`train-model` (one log per seed/config of a sweep) and `evaluate-models` write their output to
-`results/runs/<id>__<train|eval>__<flags>.log` while still printing it. The id counts up, and the filename lists the
-flags that differ from their default (`key=value`, `+` between list items). Each log starts with the full command and git
-commit and ends with a `# finished:` line holding status and duration.
+`train-model` (one run per seed/config of a sweep) and `evaluate-models` give every run its own folder,
+`results/runs/<id>__<train|eval>__<flags>/`, and write everything the run produces into it. The id counts up, and the
+folder name lists the flags that differ from their default (`key=value`, `+` between list items; output paths are left
+out). `run.log` holds the output while still printing it, starting with the full command and git commit and ending with
+a `# finished:` line holding status and duration.
+
+```text
+results/runs/0095__eval__input=maccs_models=ridge_nfolds=3/
+    run.log            # always
+    results.md         # always: the full-width result tables (--output-md redirects it)
+    predictions.csv    # --predictions-out
+    folds.csv          # --folds-out
+    plots/             # --plots
+    member_predictions.csv   # --member-predictions-out
+```
+
+`--member-predictions-out` (with `--nfolds`) saves one row per molecule per fitted model (`smiles, isoform, model,
+input, seed, fold, role, y_true, y_pred`), where `role` is `fit` for the rows that model was trained on and `holdout`
+for the fold it was held out of. The `holdout` rows are exactly what an affine recalibration is fitted on, so any
+post-hoc calibration can be refitted from the CSV without retraining anything. It is off by default, since predicting
+on the fit rows is extra inference and the file grows with models x inputs x isoforms x seeds x folds.
+
+Flags that write a file take an optional path: bare (`--predictions-out`) writes the default name in the run folder,
+and with a path it writes there instead. `train-model` puts its checkpoints and metrics in the run folder too, unless
+`--output-dir` names somewhere else. Logs from before run folders existed are flat `.log` files; `list-runs` still
+reads them, and `list-runs --migrate` moves them into folders.
 
 
 ## Representations
@@ -169,6 +191,8 @@ names below; several names are hstacked into one feature matrix.
 | `morgan` | `MorganFingerprint` | 2048 | Morgan/ECFP4 bits, radius 2 |
 | `count_morgan` | `CountMorganFingerprint` | 2048 | same generator, substructure counts |
 | `maccs` | `MACCS` | 167 | MACCS structural keys |
+| `avalon` | `AvalonFingerprint` | 1024 | Avalon fingerprint bits (RDKit `pyAvalonTools`) |
+| `count_avalon` | `CountAvalonFingerprint` | 1024 | same feature set, per-bit counts |
 | `mordred` | `MordredDescriptors` | 1613 | Mordred 2D descriptors (`mordredcommunity`); missing values encoded as 0 |
 | `xtb_solv_v1` | `XTBSolvation` | 9 | GFN2-xTB (`tblite`) ALPB water/octanol solvation, xTB logP, heuristic logD at pH 7.4; slow, see note below |
 | `xtb_elec_v1` | `XTBElectronic` | 24 | Boltzmann-averaged GFN2-xTB FMO energies, charges, SASA, shape, flexibility; shares conformers with `xtb_solv_v1` |
@@ -205,12 +229,13 @@ a dataset name or alias, a filename under `--data-dir`, or a path
 (`--unblinded test_unblinded`, `--unblinded data/other.csv`), so any labelled set with the
 same `Molecule_Name` and target columns can be scored.
 
-`--predictions-out <path>` optionally saves one UTF-8 long-format CSV containing
-validation predictions for every selected model, input set, and target (when blind-set
+`--predictions-out` optionally saves one UTF-8 long-format CSV containing
+validation predictions for every selected model, input set, and target — bare it writes
+`predictions.csv` in the run folder, or pass a path. When blind-set
 predictions are computed, via `--predict-blind` or `--plots train-test`, it also writes a
 sibling `<stem>.blind.csv`, `molecule,isoform,model,input,split,seed,y_pred`, which
 `plot-results` reads; `--predict-blind` separately writes one
-`results/<model>_<input>_blind_predictions.csv` per model and input):
+`<run folder>/<model>_<input>_blind_predictions.csv` per model and input:
 
 ```text
 smiles,isoform,model,input,split,seed,y_true,y_pred
@@ -354,6 +379,36 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
 - Models whose validation predictions correlate above 0.95 (Pearson, complete
   linkage) are averaged into one before ensembling; `--no-cv-deduplication`
   disables this. It runs after the filters.
+- `--affine-recalibration`: recalibrate every model and ensemble row with
+  `y = slope * prediction + intercept` (Platt-style linear recalibration; the
+  calibration slope/intercept of Steyerberg et al. 2010, fit-on-held-out as in
+  Kuleshov et al. 2018). The least-squares map is fitted on the out-of-fold
+  predictions only and applied once to the validation and blind rows; the CV
+  metrics use a map fitted on the other folds, so they stay honest. Slopes and
+  intercepts are printed in an `Affine recalibration` table. Plain `--nfolds`.
+  Every model then appears twice in the result tables, once under its own name
+  for the unadjusted predictions and once as `<model> [affine]`, so the
+  adjustment can be read off directly; everything a run exports (predictions,
+  plots, blind predictions) uses the recalibrated one.
+  An `affine` plot is drawn per isoform and model, showing the out-of-fold
+  predictions before and after the map with each cloud's trend line; it can also
+  be asked for on its own with `--plots affine`, which fits the map for the plot
+  without applying it to the scores. Both need `--nfolds`.
+  The maps are also written to `affine.csv` in the run folder, one row per
+  (isoform, model, input) with the `split`, `seed` and `n_oof` they were fitted
+  under. A small `n_oof` means a noisy slope. `--affine-out <path>` writes them
+  somewhere else instead; either way an existing file is never overwritten.
+- `--center-spread moments.csv`: recentre and rescale every prediction set onto a
+  target mean and standard deviation per isoform, read from a CSV with the columns
+  `isoform,mean,std` (`3A4` or the full target column name). Each set is mapped so it
+  carries exactly that mean and spread, with the cross-validation folds sharing the
+  pooled out-of-fold scaling; the transformed predictions are what the run exports, and
+  each model is also scored untransformed as a comparison row. Being monotone, it leaves
+  Spearman and Kendall untouched. It cannot be combined with `--affine-recalibration`:
+  moment matching sets the mean and spread outright, so the affine map's effect on them
+  is overwritten. For squared error it is the worse of the two unless the supplied
+  numbers are genuinely better than what the training labels imply — see
+  `src/models/center_spread.py` for why.
 - Every filter and deduplication decision is logged to stderr and summarised in an
   `ensemble filters` table with each model's scores, kept/dropped status and cluster.
 

@@ -18,6 +18,7 @@ from data_tools.load import load_data, load_test, load_train
 from representations.embedding_metrics import evaluate_embedding, evaluate_shift, fingerprint_shift
 from representations.foundation_alias import ALIAS_FILE, load_aliases, set_alias
 from data_tools.paths import DATA_DIR, FEATURE_DIR
+from models.run_log import clean_interrupt
 
 console = Console()
 
@@ -252,6 +253,12 @@ def _evaluate(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Entry point for the representations CLI."""
+    with clean_interrupt("representations"):
+        _run()
+
+
+def _run() -> None:
+    """Parse the arguments and do the requested work."""
     parser = argparse.ArgumentParser(description="Inspect, fill, or evaluate the representation feature cache.")
     parser.add_argument("--check", action="store_true", help="Show which representations are cached and how complete they are")
     parser.add_argument(
