@@ -23,6 +23,7 @@ from rich.markup import escape
 from rich.table import Table
 from tqdm import tqdm
 
+from data_tools.datasets import challenge
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from data_tools.load import cv_folds, load_data
 from models import REGISTRY, CYPModel, dimred
@@ -35,21 +36,40 @@ from models.run_log import changed_flags, clean_interrupt, print_split, run_log
 from models.utils import drop_nan_rows, zero_nonfinite_features
 from data_tools.paths import DATA_DIR, FEATURE_DIR
 
-_CYP_TARGETS = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-]
+def _scored_targets() -> list[str]:
+    """The challenge's scored target columns, from its dataset spec."""
+    return list(challenge().targets)
 
-_ISOFORMS = {t.split("_")[0].removeprefix("CYP"): t for t in _CYP_TARGETS}
+
+def _short_targets() -> dict[str, str]:
+    """{shorthand: full target column} for the challenge, e.g. {'CYP2D6': 'CYP2D6_pIC50_direct_inhibition'}."""
+    spec = challenge()
+    return {spec.shorthand(t): t for t in spec.targets}
+
+
+def _label(target: str) -> str:
+    """How a target column is written in a table: the challenge's shorthand for it."""
+    return challenge().shorthand(target)
+
+
+def _blind_file(parser: argparse.ArgumentParser) -> str:
+    """The challenge's blinded prediction set, relative to the data directory."""
+    from data_tools.datasets import blind_spec
+
+    spec = blind_spec()
+    if spec is None:
+        parser.error(
+            f"dataset {challenge().name!r} declares no blind set, so there is nothing to predict; "
+            "drop --predict-blind and the train-test plot"
+        )
+    return spec.primary
 
 console = Console()
 
-_PREDICTION_COLUMNS = ["smiles", "isoform", "model", "input", "split", "seed", "y_true", "y_pred"]
+_PREDICTION_COLUMNS = ["smiles", "target", "model", "input", "split", "seed", "y_true", "y_pred"]
 
 
-_BLIND_COLUMNS = ["molecule", "isoform", "model", "input", "split", "seed", "y_pred"]
+_BLIND_COLUMNS = ["molecule", "target", "model", "input", "split", "seed", "y_pred"]
 
 
 def _blind_path(predictions_out: Path) -> Path:
@@ -125,7 +145,7 @@ def _write_predictions(path: Path, rows: list[dict[str, object]]) -> None:
         if key in seen:
             raise ValueError(
                 f"Cannot export predictions: duplicate SMILES {row['smiles']!r} within "
-                f"isoform={row['isoform']}, model={row['model']}, input={row['input']}, "
+                f"target={row['target']}, model={row['model']}, input={row['input']}, "
                 f"split={row['split']}, seed={row['seed']}; downstream SMILES joins would be ambiguous. "
                 "No rows were deduplicated or written."
             )
@@ -140,11 +160,11 @@ def _write_predictions(path: Path, rows: list[dict[str, object]]) -> None:
         raise OSError(f"Cannot write predictions CSV to {path}: {exc}") from exc
 
 
-_AFFINE_COLUMNS = ["isoform", "model", "input", "split", "seed", "n_oof", "slope", "intercept"]
+_AFFINE_COLUMNS = ["target", "model", "input", "split", "seed", "n_oof", "slope", "intercept"]
 
 # One row per molecule per fitted model: role says whether that model was fitted on the molecule ("fit")
 # or held out of it ("holdout"). The holdout rows are what a post-hoc affine recalibration is fitted on.
-_MEMBER_COLUMNS = ["smiles", "isoform", "model", "input", "seed", "fold", "role", "y_true", "y_pred"]
+_MEMBER_COLUMNS = ["smiles", "target", "model", "input", "seed", "fold", "role", "y_true", "y_pred"]
 
 
 def _write_members(path: Path, rows: list[dict[str, object]]) -> None:
@@ -571,7 +591,7 @@ def _short(label: str) -> str:
 
 
 def _aggregate(results: list[tuple[str, str, str, dict[str, float]]]) -> list[tuple[str, str, dict[str, float]]]:
-    """Macro-average each metric over isoforms per (model, input); NaNs are skipped per metric."""
+    """Macro-average each metric over targets per (model, input); NaNs are skipped per metric."""
     grouped: dict[tuple[str, str], list[dict[str, float]]] = {}
     for _, name, inp, m in results:
         grouped.setdefault((name, inp), []).append(m)
@@ -608,7 +628,7 @@ def _format_cell(metric: str, value: float, best: float) -> str:
 
 
 def _print_results(results: list[tuple[str, str, str, dict[str, float]]], sort_by: str) -> None:
-    """Print one metrics table with a block per isoform and a final macro-average block.
+    """Print one metrics table with a block per target and a final macro-average block.
 
     The best value on each metric within a block is bold green. On the terminal, Model/Input names are
     shortened with "…" to fit its width; the run log gets the same table with every name in full.
@@ -618,21 +638,21 @@ def _print_results(results: list[tuple[str, str, str, dict[str, float]]], sort_b
 
 def _results_table(results: list[tuple[str, str, str, dict[str, float]]], sort_by: str, fit_width: int | None) -> Table:
     """The metrics table for _print_results; Model/Input names are shortened to fit `fit_width` (None: never)."""
-    by_isoform: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
-    for iso, name, inp, m in results:
-        by_isoform.setdefault(iso, []).append((name, inp, m))
-    blocks = list(by_isoform.items())
-    if len(by_isoform) > 1:
+    by_target: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
+    for target, name, inp, m in results:
+        by_target.setdefault(target, []).append((name, inp, m))
+    blocks = list(by_target.items())
+    if len(by_target) > 1:
         macro = _aggregate(results)
         reverse = not _LOWER_IS_BETTER[sort_by]
         macro.sort(key=lambda r: (-r[2][sort_by] if reverse else r[2][sort_by]) if not np.isnan(r[2][sort_by]) else float("inf"))
         blocks.append(("MEAN", macro))
 
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title_style="bold", padding=(0, 1), pad_edge=False)
-    table.add_column("Isoform", style="bold", no_wrap=True)
+    table.add_column("Target", style="bold", no_wrap=True)
     table.add_column("Model", no_wrap=True)
     table.add_column("Input", no_wrap=True)
-    # Data-point counts ride along in each result's metrics dict; the MEAN rows have none (counts differ per isoform).
+    # Data-point counts ride along in each result's metrics dict; the MEAN rows have none (counts differ per target).
     counts = {id(m): f"{int(m['n_train'])}/{int(m['n_val'])}" for _, rows in blocks for _, _, m in rows if "n_train" in m}
     counts_width = max([len("Train/Val"), *map(len, counts.values())])
     table.add_column("Train/Val", justify="right", no_wrap=True, overflow="ignore", min_width=counts_width)
@@ -650,8 +670,8 @@ def _results_table(results: list[tuple[str, str, str, dict[str, float]]], sort_b
     model_width = max(len(r[0]) for _, rows in blocks for r in rows)
     input_width = max(len(_short(r[1])) for _, rows in blocks for r in rows)
     if fit_width is not None:
-        isoform_width = max(len("Isoform"), *(len(iso.replace("_pIC50_direct_inhibition", "")) for iso, _ in blocks))
-        label_budget = max(2 * _MIN_LABEL_WIDTH, fit_width - numeric_width - isoform_width - 3 * 3 - 2)
+        target_width = max(len("Target"), *(len(_label(t)) for t, _ in blocks))
+        label_budget = max(2 * _MIN_LABEL_WIDTH, fit_width - numeric_width - target_width - 3 * 3 - 2)
         if model_width + input_width > label_budget:
             half = label_budget // 2
             if model_width <= half:
@@ -661,15 +681,15 @@ def _results_table(results: list[tuple[str, str, str, dict[str, float]]], sort_b
             else:
                 model_width, input_width = label_budget - half, half
 
-    for i, (iso, rows) in enumerate(blocks):
+    for i, (target, rows) in enumerate(blocks):
         best = {}
         for metric, lower in _LOWER_IS_BETTER.items():
             values = [r[2][metric] for r in rows if not np.isnan(r[2][metric])]
             best[metric] = (min if lower else max)(values) if values else float("nan")
         for j, (name, inp, m) in enumerate(rows):
-            label = iso.replace("_pIC50_direct_inhibition", "") if j == 0 else ""
+            label = _label(target) if j == 0 else ""
             table.add_row(
-                f"[bold magenta]{label}[/]" if iso == "MEAN" else label,
+                f"[bold magenta]{label}[/]" if target == "MEAN" else label,
                 escape(_ellipsize(name, model_width)),
                 escape(_ellipsize(_short(inp), input_width)),
                 counts.get(id(m), ""),
@@ -682,7 +702,7 @@ def _results_table(results: list[tuple[str, str, str, dict[str, float]]], sort_b
 def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
     """Print what the ensemble filters decided for every model: its scores, whether it was kept, and its cluster."""
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title_style="bold", padding=(0, 1), pad_edge=False)
-    for column, justify in [("Isoform", "left"), ("Input", "left"), ("Model", "left"), ("OOF R2", "right"),
+    for column, justify in [("Target", "left"), ("Input", "left"), ("Model", "left"), ("OOF R2", "right"),
                             ("RAE ratio", "right"), ("Filter", "left"), ("Cluster", "right")]:
         table.add_column(column, justify=justify, no_wrap=True)
     groups = list(dict.fromkeys((r["target"], r["input"]) for r in log))
@@ -691,7 +711,7 @@ def _print_filter_log(log: list[dict], filters: list[str], dedup: bool) -> None:
         for j, r in enumerate(rows):
             kept = r["status"] == "kept"
             table.add_row(
-                target.replace("_pIC50_direct_inhibition", "") if j == 0 else "",
+                _label(target) if j == 0 else "",
                 escape(_short(input_label)) if j == 0 else "",
                 escape(r["model"]),
                 f"{r['r2']:.3f}",
@@ -714,7 +734,7 @@ def _print_affine(log: list[dict[str, object]]) -> None:
         table.add_column(column, justify=justify, overflow="fold")
     for row in log:
         table.add_row(
-            escape(str(row["isoform"]).replace("_pIC50_direct_inhibition", "")),
+            escape(_label(str(row["target"]))),
             escape(str(row["model"])), escape(_short(str(row["input"]))), str(row["n_oof"]),
             f"{row['slope']:.3f}", f"{row['intercept']:+.3f}",
         )
@@ -725,21 +745,21 @@ def _print_affine(log: list[dict[str, object]]) -> None:
 def _print_stacks(reports: list[tuple[str, str, str, list[str], np.ndarray, float, dict[str, float]]]) -> None:
     """Print each stacker's per-model weights; share is the weight over the sum of absolute weights."""
     table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", title_style="bold", padding=(0, 1), pad_edge=False)
-    for column, justify in [("Isoform", "left"), ("Input", "left"), ("Model", "left"), ("Weight", "right"), ("Share", "right")]:
+    for column, justify in [("Target", "left"), ("Input", "left"), ("Model", "left"), ("Weight", "right"), ("Share", "right")]:
         table.add_column(column, justify=justify, no_wrap=True)
     notes = []
     for i, (target, input_label, method, names, weights, intercept, params) in enumerate(reports):
-        iso = target.replace("_pIC50_direct_inhibition", "")
+        label = _label(target)
         total = float(np.abs(weights).sum())
         for j, (name, weight) in enumerate(zip(names, weights)):
             share = f"{abs(weight) / total:.1%}" if total > 0 else "n/a"
             table.add_row(
-                iso if j == 0 else "", escape(_short(input_label)) if j == 0 else "", escape(name),
+                label if j == 0 else "", escape(_short(input_label)) if j == 0 else "", escape(name),
                 f"{weight:.3f}" if weight else "[dim]0[/]", share,
                 end_section=j == len(names) - 1 and i < len(reports) - 1,
             )
         fitted = ", ".join(f"{k}={v:g}" for k, v in {"intercept": intercept, **params}.items())
-        notes.append(f"{iso}, {_short(input_label)}: {fitted}")
+        notes.append(f"{label}, {_short(input_label)}: {fitted}")
     console.print(f"\n[dim]stacking weights[/]  [dim]method[/]={reports[0][2]}")
     _print(table)
     for note in notes:
@@ -774,17 +794,17 @@ def _write_markdown(
     lines = ["# evaluate-models results", "", f"`{header}`", ""]
     reverse = not _LOWER_IS_BETTER[sort_by]
     for title, results in sections:
-        by_isoform: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
-        for iso, name, inp, m in results:
-            by_isoform.setdefault(iso, []).append((name, inp, m))
-        blocks = list(by_isoform.items())
-        if len(by_isoform) > 1:
+        by_target: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
+        for target, name, inp, m in results:
+            by_target.setdefault(target, []).append((name, inp, m))
+        blocks = list(by_target.items())
+        if len(by_target) > 1:
             macro = _aggregate(results)
             macro.sort(key=lambda r: (-r[2][sort_by] if reverse else r[2][sort_by]) if not np.isnan(r[2][sort_by]) else float("inf"))
             blocks.append(("MEAN", macro))
         lines += [f"## {title}", ""]
-        for iso, rows in blocks:
-            lines += [f"### {iso.replace('_pIC50_direct_inhibition', '')}", ""]
+        for block_target, rows in blocks:
+            lines += [f"### {_label(block_target)}", ""]
             lines.append("| # | Model | Input | Train/Val | " + " | ".join(_METRICS) + " |")
             lines.append("|--:|---|---|---|" + "|".join("--:" for _ in _METRICS) + "|")
             for i, (name, inp, m) in enumerate(rows, 1):
@@ -796,7 +816,7 @@ def _write_markdown(
         if len(preds) < 2:
             continue
         labels = list(preds)
-        lines += [f"## Prediction correlation (Pearson) · {target.replace('_pIC50_direct_inhibition', '')}", ""]
+        lines += [f"## Prediction correlation (Pearson) · {_label(target)}", ""]
         lines += [f"{i}. {a[0]} [{_short(a[1])}]" for i, a in enumerate(labels)]
         lines += ["", "| |" + "|".join(str(i) for i in range(len(labels))) + "|", "|---|" + "|".join("--:" for _ in labels) + "|"]
         for i, a in enumerate(labels):
@@ -816,7 +836,7 @@ def _print_correlations(target: str, preds: dict[tuple[str, str], dict[int, floa
     table = Table(
         box=box.SIMPLE_HEAD,
         header_style="bold cyan",
-        title=f"Prediction correlation (Pearson) · {target.replace('_pIC50_direct_inhibition', '')}",
+        title=f"Prediction correlation (Pearson) · {_label(target)}",
         title_style="bold",
     )
     table.add_column("", style="bold", overflow="fold")
@@ -861,7 +881,7 @@ def main() -> None:
     parser.add_argument(
         "--member-predictions-out", type=Path, nargs="?", const=IN_RUN_DIR, default=None,
         help="Write every fitted model's predictions on the rows it was fitted on (role=fit) and on the fold it "
-        "was held out of (role=holdout) to a CSV, per model, input, isoform, seed and fold, so an affine "
+        "was held out of (role=holdout) to a CSV, per model, input, target, seed and fold, so an affine "
         "recalibration (or any other post-processing) can be fitted afterwards without refitting. Bare, it writes "
         "member_predictions.csv in the run folder; with a path, there. Needs --nfolds, and predicting on the fit "
         "rows is extra inference",
@@ -871,8 +891,8 @@ def main() -> None:
         type=Path,
         default=None,
         metavar="CSV",
-        help="Recentre and rescale every prediction set onto a target mean and standard deviation per isoform, "
-        "read from a CSV with the columns isoform,mean,std (isoform as 3A4 or the full target column). Each set is "
+        help="Recentre and rescale every prediction set onto a target mean and standard deviation per target, "
+        "read from a CSV with the columns target,mean,std (the target as 3A4 or the full column name). Each set is "
         "mapped so it carries exactly that mean and spread; the cross-validation folds share the pooled "
         "out-of-fold scaling. The transformed predictions are what the run exports, and each model is also scored "
         "untransformed for comparison. Cannot be combined with --affine-recalibration",
@@ -880,7 +900,7 @@ def main() -> None:
     parser.add_argument(
         "--affine-out",
         type=Path,
-        help="Where to write each fitted affine map (isoform, model, input, split, seed, n_oof, slope, intercept). "
+        help="Where to write each fitted affine map (target, model, input, split, seed, n_oof, slope, intercept). "
         "With --affine-recalibration they are always written: by default to affine.csv in the run folder, which this "
         "flag redirects. Creates parents, refuses existing files",
     )
@@ -950,20 +970,17 @@ def main() -> None:
         "warning. Default with --nfolds: r2 RAE. Use 'none' to disable",
     )
     parser.add_argument("--models", nargs="+", default=["all"], help="Model names to evaluate, or 'all'")
+    # The dataset is not a flag: `datasets.challenge()` names it and its target columns, and
+    # CHALLENGE_DATASET picks another. These two only narrow which of its targets this run scores.
+    scored = challenge()
     parser.add_argument(
         "--targets",
         nargs="+",
         default=None,
-        choices=_CYP_TARGETS,
-        help="CYP target column(s) to evaluate (default: all four isoforms)",
-    )
-    parser.add_argument(
-        "--isoforms",
-        nargs="+",
-        default=None,
-        choices=list(_ISOFORMS),
-        help="Shorthand for --targets: isoform(s) to evaluate, direct inhibition pIC50 only "
-        f"(e.g. --isoforms 3A4 2D6). Choices: {list(_ISOFORMS)}",
+        help=f"Target(s) of {scored.name} to evaluate (default: all of them). Each is a full column name, "
+        f"the shorthand, or any unambiguous tail of one, e.g. --targets "
+        f"{' '.join(scored.shorthand(t) for t in scored.targets[:2])}. "
+        f"Choices: {', '.join(scored.shorthand(t) for t in scored.targets)}",
     )
     parser.add_argument(
         "--input",
@@ -1026,14 +1043,14 @@ def main() -> None:
         "--plots",
         nargs="+",
         choices=PLOT_KINDS,
-        help="Write diagnostic plots, one PNG per isoform and model (or per ensemble where there is one): "
+        help="Write diagnostic plots, one PNG per target and model (or per ensemble where there is one): "
         "train-test overlays the train label distribution with the predictions on the blind test set (data/test.csv); "
         "heldout-skew plots predicted vs experimental on the validation split to show systematic over/under-prediction",
     )
     parser.add_argument(
         "--plots-terminal",
         action="store_true",
-        help="Also draw the --plots in the terminal as a grid (isoforms across, model/input combinations down). "
+        help="Also draw the --plots in the terminal as a grid (targets across, model/input combinations down). "
         "Uses inline images (kitty, WezTerm, ghostty, iTerm2) and falls back to text plots (plotext), "
         "wrapped to the terminal width, anywhere else",
     )
@@ -1055,12 +1072,11 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     """Evaluate the models for parsed arguments, writing this run's files into `run_dir`."""
     args.input = args.input or [["rdkit"]]
 
-    if args.targets is not None and args.isoforms is not None:
-        parser.error("--targets and --isoforms are mutually exclusive")
-    if args.isoforms is not None:
-        args.targets = [_ISOFORMS[i] for i in args.isoforms]
-    elif args.targets is None:
-        args.targets = _CYP_TARGETS
+    try:
+        # Narrows the challenge's own targets, so the spec resolves them and names the choices on a typo.
+        args.targets = challenge().resolve_targets(args.targets)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.nfolds is not None and args.nfolds < 2:
         parser.error(f"--nfolds must be >= 2, got {args.nfolds}")
@@ -1232,7 +1248,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
     # The train-test plot compares train labels with predictions on the blind set, so it needs them too,
     # and --unblinded scores those same predictions against released labels.
     needs_blind = args.predict_blind or args.unblinded is not None or "train-test" in (args.plots or [])
-    blind_df = pl.read_csv(args.data_dir / "test.csv") if needs_blind else None
+    blind_df = pl.read_csv(args.data_dir / _blind_file(parser)) if needs_blind else None
     unblinded_results: list[tuple[str, str, str, dict[str, float]]] = []
     unblinded_labels: dict[str, np.ndarray] = {}
     if args.unblinded is not None:
@@ -1371,7 +1387,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
 
     for input_names in input_sets:
         base_label = " + ".join(input_names)
-        # Features don't depend on the target isoform or the reduction, so compute once and reuse.
+        # Features don't depend on the target or the reduction, so compute once and reuse.
         base_train = zero_nonfinite_features(
             featurize(train_df, input_names, cache_dir), f"train/{base_label}", train_df["SMILES"].to_list(),
         )
@@ -1395,7 +1411,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, run_dir: Pat
                     file=sys.stderr,
                 )
             if reduction is not None and not reduction.supervised:
-                # Unsupervised: fit once on every train-split row, shared by all isoforms.
+                # Unsupervised: fit once on every train-split row, shared by all targets.
                 reducer = dimred.fit(reduction, train_features, cache_dir=dimred_dir)
                 train_features = reducer.transform(train_features)
                 val_features = reducer.transform(val_features)

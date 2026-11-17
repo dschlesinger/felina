@@ -2,23 +2,29 @@
 or ElasticNetCV stackers, and apply fitted weights to aligned predictions.
 """
 
+from collections.abc import Sequence
+
 import numpy as np
 import polars as pl
 from scipy.optimize import nnls
 from sklearn.linear_model import ElasticNetCV, RidgeCV
 from sklearn.model_selection import PredefinedSplit
 
-
-_SCORED_DEFAULT = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-]
+from data_tools.datasets import challenge
 
 
-def _validate_inputs(predictions: pl.DataFrame, truth: pl.DataFrame) -> None:
-    """Raise ValueError when OOF predictions and truth cannot be safely aligned."""
+def _validate_inputs(
+    predictions: pl.DataFrame,
+    truth: pl.DataFrame,
+    *,
+    targets: Sequence[str] | None = None,
+) -> None:
+    """Raise ValueError when OOF predictions and truth cannot be safely aligned.
+
+    targets lists the scored target columns; it defaults to the challenge's.
+    """
+
+    targets = list(targets) if targets is not None else list(challenge().targets)
 
     # 1. Required headers
     prediction_required = {"model_id", "inchikey_full", "fold", "target", "pred"}
@@ -100,19 +106,19 @@ def _validate_inputs(predictions: pl.DataFrame, truth: pl.DataFrame) -> None:
         raise ValueError(f"There are {len(truth_dup_keys)} duplicates in truth.")
 
     # 4. Canonical target set
-    predictions_missing_target = set(_SCORED_DEFAULT) - set(predictions["target"].to_list())  
+    predictions_missing_target = set(targets) - set(predictions["target"].to_list())
     if len(predictions_missing_target) > 0:
         raise ValueError(f"Predictions missing target: {sorted(predictions_missing_target)}")
 
-    truth_missing_target = set(_SCORED_DEFAULT) - set(truth["target"].to_list())
+    truth_missing_target = set(targets) - set(truth["target"].to_list())
     if len(truth_missing_target) > 0:
         raise ValueError(f"Truth missing target: {sorted(truth_missing_target)}")
 
-    predictions_unexpected_target = set(predictions["target"].to_list()) - set(_SCORED_DEFAULT) 
+    predictions_unexpected_target = set(predictions["target"].to_list()) - set(targets)
     if len(predictions_unexpected_target) > 0:
         raise ValueError(f"Predictions unexpected target: {sorted(predictions_unexpected_target)}")
 
-    truth_unexpected_target = set(truth["target"].to_list()) - set(_SCORED_DEFAULT) 
+    truth_unexpected_target = set(truth["target"].to_list()) - set(targets)
     if len(truth_unexpected_target) > 0:
         raise ValueError(f"Truth unexpected target: {sorted(truth_unexpected_target)}")
 
@@ -197,12 +203,18 @@ def _seed_averaging(
     prediction_by_seed: dict[int, pl.DataFrame],
     truth: pl.DataFrame,
     model_id: str,
+    *,
+    targets: Sequence[str] | None = None,
 ) -> pl.DataFrame:
     """Average seeds for models that have same configuration and differ only in seed.
-    
-    Inputs must be runs of the same configuration with distinct training seeds, as 
+
+    Inputs must be runs of the same configuration with distinct training seeds, as
     supplied by the multi-seed OOF runner.
+
+    targets lists the scored target columns; it defaults to the challenge's.
     """
+
+    targets = list(targets) if targets is not None else list(challenge().targets)
 
     for seed in prediction_by_seed.keys():
         if not isinstance(seed, int) or isinstance(seed, bool):
@@ -218,7 +230,7 @@ def _seed_averaging(
         raise ValueError("There must be at least three seed entries")
 
     for table in prediction_by_seed.values():
-        _validate_inputs(table, truth)
+        _validate_inputs(table, truth, targets=targets)
 
         if table["model_id"].n_unique() > 1:
             raise ValueError("Each prediction table must contain exactly one model_id.")
@@ -275,8 +287,13 @@ def _rmse(actual: np.ndarray, predicted: np.ndarray) -> float:
     return rmse
 
 
-def fit_nnls_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, dict]:
-    """Fit separate non-negative ensemble weights for the four scored CYP targets.
+def fit_nnls_stack(
+    predictions: pl.DataFrame,
+    truth: pl.DataFrame,
+    *,
+    targets: Sequence[str] | None = None,
+) -> dict[str, dict]:
+    """Fit separate non-negative ensemble weights for each scored target.
 
     Parameters
     ----------
@@ -286,6 +303,8 @@ def fit_nnls_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, 
     truth : pl.DataFrame
         Corresponding observed labels with columns:
         inchikey_full, fold, target, truth.
+    targets : Sequence[str] | None
+        The scored target columns; defaults to the challenge's.
 
     Input requirements
     ------------------
@@ -295,7 +314,7 @@ def fit_nnls_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, 
     Required fields must not be null; pred and truth must be finite integers
     or floats.
 
-    Both tables must contain exactly the four scored targets. Truth keys
+    Both tables must contain exactly the scored targets. Truth keys
     (inchikey_full, fold, target) must be unique. Prediction keys must be
     unique within each model. Input row order does not matter.
 
@@ -326,11 +345,13 @@ def fit_nnls_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, 
     table validation cannot verify how the base models were trained.
     """
 
-    _validate_inputs(predictions, truth)
+    targets = list(targets) if targets is not None else list(challenge().targets)
+
+    _validate_inputs(predictions, truth, targets=targets)
 
     results = {}
 
-    for target in _SCORED_DEFAULT:
+    for target in targets:
         model_ids = sorted(
             predictions.filter(pl.col("target") == target)["model_id"]
             .unique()
@@ -369,16 +390,25 @@ def fit_nnls_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, 
     return results
 
 
-def fit_ridgecv_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, dict]:
+def fit_ridgecv_stack(
+    predictions: pl.DataFrame,
+    truth: pl.DataFrame,
+    *,
+    targets: Sequence[str] | None = None,
+) -> dict[str, dict]:
     """Fit per-target ridge stackers on OOF predictions, selecting alpha
     using the saved folds. Return weights, intercepts, and fit metrics.
+
+    targets lists the scored target columns; it defaults to the challenge's.
     """
 
-    _validate_inputs(predictions, truth)
+    targets = list(targets) if targets is not None else list(challenge().targets)
+
+    _validate_inputs(predictions, truth, targets=targets)
 
     results = {}
-    
-    for target in _SCORED_DEFAULT:
+
+    for target in targets:
         model_ids = sorted(
             predictions.filter(pl.col("target") == target)["model_id"]
             .unique()
@@ -437,16 +467,25 @@ def fit_ridgecv_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[st
     return results
 
 
-def fit_elasticnetcv_stack(predictions: pl.DataFrame, truth: pl.DataFrame) -> dict[str, dict]:
+def fit_elasticnetcv_stack(
+    predictions: pl.DataFrame,
+    truth: pl.DataFrame,
+    *,
+    targets: Sequence[str] | None = None,
+) -> dict[str, dict]:
     """Fit per-target elastic-net stackers on OOF predictions, selecting alpha
     and l1_ratio using saved folds. Return weights, intercepts, and fit metrics.
+
+    targets lists the scored target columns; it defaults to the challenge's.
     """
 
-    _validate_inputs(predictions, truth)
+    targets = list(targets) if targets is not None else list(challenge().targets)
+
+    _validate_inputs(predictions, truth, targets=targets)
 
     results = {}
-    
-    for target in _SCORED_DEFAULT:
+
+    for target in targets:
         model_ids = sorted(
             predictions.filter(pl.col("target") == target)["model_id"]
             .unique()

@@ -38,6 +38,31 @@ def test_rejects_bad_csv(tmp_path, text, message):
         load_targets(_csv(tmp_path, text))
 
 
+def test_loads_target_header(tmp_path):
+    path = _csv(tmp_path, "target,mean,std\n3A4,5.0,1.2\nCYP2C9,4.4,0.9\nCYP1A2_pIC50_direct_inhibition,4.0,1.0\n")
+    assert load_targets(path) == {
+        "CYP3A4_pIC50_direct_inhibition": (5.0, 1.2),
+        "CYP2C9_pIC50_direct_inhibition": (4.4, 0.9),
+        "CYP1A2_pIC50_direct_inhibition": (4.0, 1.0),
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("target,mean\n3A4,5.0\n", "no column\\(s\\) std"),
+        ("mean,std\n5.0,1.2\n", "no column\\(s\\) target"),
+        ("target,mean,std\n", "no rows"),
+        ("target,mean,std\n3A4,high,1.2\n", "must be numbers"),
+        ("target,mean,std\n3A4,5.0,0\n", "above zero"),
+        ("target,mean,std\n3A4,5.0,1.2\nCYP3A4,4.0,1.0\n", "twice"),
+    ],
+)
+def test_rejects_bad_csv_with_target_header(tmp_path, text, message):
+    with pytest.raises(ValueError, match=message):
+        load_targets(_csv(tmp_path, text))
+
+
 def test_missing_file_names_itself(tmp_path):
     with pytest.raises(ValueError, match="Cannot read"):
         load_targets(tmp_path / "absent.csv")

@@ -7,38 +7,43 @@ span folds. Support feature models and multiple training seeds.
 import argparse
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 
+from data_tools.datasets import challenge
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from models import REGISTRY
 from models.utils import drop_nan_rows
 from representations.chemprop_weights import parse_spec
 
 
-_SCORED_DEFAULT = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-]
-
 _COMPLETION_VERSION = 1
 
 
-def _validate_inputs(truth: pl.DataFrame, heldout_fold: int, predictions: pl.DataFrame, model_id: str) -> None:
+def _validate_inputs(
+    truth: pl.DataFrame,
+    heldout_fold: int,
+    predictions: pl.DataFrame,
+    model_id: str,
+    *,
+    targets: Sequence[str] | None = None,
+) -> None:
     """
     truth already contains the saved fold assignments, the function validates
     one model/fold job, and failures raise ValueError.
 
-    Requires the requested held-out fold to contain all four scored targets;
+    Requires the requested held-out fold to contain every scored target;
     individual molecules may have labels for only a subset of them.
+
+    targets lists the scored target columns; it defaults to the challenge's.
 
     Validates the entire supplied truth table for duplicates and fold consistency.
     """
+
+    targets = list(targets) if targets is not None else list(challenge().targets)
     # Required columns
     prediction_required = {"model_id", "inchikey_full", "fold", "target", "pred"}
     prediction_missing = prediction_required - set(predictions.columns)
@@ -180,7 +185,7 @@ def _validate_inputs(truth: pl.DataFrame, heldout_fold: int, predictions: pl.Dat
             f"{inconsistent_truth.head(5).to_dicts()}"
         )
 
-    allowed_targets = set(_SCORED_DEFAULT)
+    allowed_targets = set(targets)
 
     # Reject unexpected targets anywhere in the supplied truth.
     truth_targets = set(truth["target"].to_list())
@@ -197,7 +202,7 @@ def _validate_inputs(truth: pl.DataFrame, heldout_fold: int, predictions: pl.Dat
             f"Predictions contain unexpected targets: {sorted(unexpected_predictions)}"
         )
 
-    # Require all four scored targets in this held-out fold.
+    # Require every scored target in this held-out fold.
     fold_targets = set(expected_keys["target"].to_list())
     missing_targets = allowed_targets - fold_targets
     if missing_targets:
@@ -232,11 +237,15 @@ def _file_sha256(path: Path) -> str:
 def _validate_completion(
         job_dir: Path, 
         truth: pl.DataFrame, 
-        run_id: str, 
-        model_id: str, 
+        run_id: str,
+        model_id: str,
         heldout_fold: int,
+        targets: Sequence[str] | None = None,
 ) -> bool:
-    """Return whether saved artifacts form a valid completed job."""
+    """Return whether saved artifacts form a valid completed job.
+
+    targets lists the scored target columns; it defaults to the challenge's.
+    """
 
     prediction_path = job_dir / "predictions.csv"
     completion_path = job_dir / "complete.json"
@@ -288,6 +297,7 @@ def _validate_completion(
             heldout_fold=heldout_fold,
             predictions=predictions,
             model_id=model_id,
+            targets=targets,
         )
     except ValueError:
         return False
@@ -299,15 +309,18 @@ def _write_fold_artifacts(
         job_dir: Path, 
         predictions: pl.DataFrame, 
         truth: pl.DataFrame,
-        run_id: str, 
-        model_id: str, 
+        run_id: str,
+        model_id: str,
         heldout_fold: int,
+        targets: Sequence[str] | None = None,
 ) -> None:
     """
     Construct completion metadata using the saved CSV’s checksum.
     Write temporary JSON, then rename it to complete.json last.
+
+    targets lists the scored target columns; it defaults to the challenge's.
     """
-    _validate_inputs(truth, heldout_fold, predictions, model_id)
+    _validate_inputs(truth, heldout_fold, predictions, model_id, targets=targets)
 
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -323,6 +336,7 @@ def _write_fold_artifacts(
         heldout_fold=heldout_fold,
         predictions=saved_predictions,
         model_id=model_id,
+        targets=targets,
     )
 
     temporary_path.replace(prediction_path)
@@ -358,10 +372,14 @@ def _run_fold_job(
     truth: pl.DataFrame,
     run_id: str, 
     model_id: str, 
-    heldout_fold: int, 
+    heldout_fold: int,
     generate_predictions: Callable[[], pl.DataFrame],
+    targets: Sequence[str] | None = None,
 ) -> bool:
-    """Return True if the job ran, or False if valid output was reused."""
+    """Return True if the job ran, or False if valid output was reused.
+
+    targets lists the scored target columns; it defaults to the challenge's.
+    """
 
     if _validate_completion(
         job_dir=job_dir,
@@ -369,18 +387,20 @@ def _run_fold_job(
         run_id=run_id,
         model_id=model_id,
         heldout_fold=heldout_fold,
+        targets=targets,
     ):
         return False
-    
+
     predictions = generate_predictions()
 
     _write_fold_artifacts(
-        job_dir=job_dir, 
+        job_dir=job_dir,
         predictions=predictions,
         truth=truth,
         run_id=run_id,
         model_id=model_id,
         heldout_fold=heldout_fold,
+        targets=targets,
     )
 
     return True
@@ -395,12 +415,21 @@ def _generate_fold_predictions(
     input_names: list[str],
     targets: list[str],
     heldout_fold: int,
-    cache_dir: Path,  
+    cache_dir: Path,
+    *,
+    scored_targets: Sequence[str] | None = None,
 ) -> pl.DataFrame:
     """Fit per-target models and return long-format predictions for one held-out fold.
 
     For each target, train on finite labeled rows and predict labeled held-out rows.
+
+    scored_targets lists the target columns the challenge is scored on; the
+    requested targets must be exactly those. It defaults to the challenge's.
     """
+
+    scored_targets = (
+        list(scored_targets) if scored_targets is not None else list(challenge().targets)
+    )
 
     if model_name not in REGISTRY:
         raise ValueError(f"Unknown model: {model_name!r}. Available: {list(REGISTRY.keys())}")
@@ -426,7 +455,7 @@ def _generate_fold_predictions(
         if missing:
             raise ValueError(f"{name} data missing columns: {sorted(missing)}")
 
-    unexpected = set(targets) - set(_SCORED_DEFAULT)
+    unexpected = set(targets) - set(scored_targets)
     if unexpected:
         raise ValueError(f"Unexpected targets: {sorted(unexpected)}")
 
@@ -474,7 +503,7 @@ def _generate_fold_predictions(
     if isinstance(heldout_fold, bool) or not isinstance(heldout_fold, int):
         raise ValueError("heldout_fold must be an integer")
             
-    allowed_targets = set(_SCORED_DEFAULT)
+    allowed_targets = set(scored_targets)
     missing_targets = allowed_targets - set(targets)
     if missing_targets:
         raise ValueError(
@@ -586,15 +615,24 @@ def _generate_fold_predictions(
     return pl.concat(prediction_tables)
 
 
-def _load_oof_data(data_path: Path, folds_path: Path) -> pl.DataFrame:
+def _load_oof_data(
+    data_path: Path,
+    folds_path: Path,
+    *,
+    targets: Sequence[str] | None = None,
+) -> pl.DataFrame:
     """Load and validate molecule data and fold assignments, then join them.
-    
+
     data_path must already contain only the approved OOF training population
+
+    targets lists the scored target columns; it defaults to the challenge's.
 
     Note: Using both inchikey_full and inchikey_block. inchikey_full is used
     for row uniqueness, fold_coverage, and join. inchikey_block is used to 
     check that records sharing a skeleton aren't assigned to different folds. 
     """
+
+    targets = list(targets) if targets is not None else list(challenge().targets)
 
     data = pl.read_csv(data_path, infer_schema_length=None)
     folds = pl.read_csv(folds_path, infer_schema_length=None)
@@ -603,7 +641,7 @@ def _load_oof_data(data_path: Path, folds_path: Path) -> pl.DataFrame:
         "inchikey_full",
         "inchikey_block",
         "SMILES",
-        *_SCORED_DEFAULT,
+        *targets,
     }
     data_missing = data_required - set(data.columns)
     if data_missing:
@@ -628,7 +666,7 @@ def _load_oof_data(data_path: Path, folds_path: Path) -> pl.DataFrame:
         raise ValueError("data.inchikey_block must contain strings")
     if data["SMILES"].dtype != pl.String:
         raise ValueError("data.SMILES must contain strings")
-    for target in _SCORED_DEFAULT:
+    for target in targets:
         if not data[target].dtype.is_numeric():
             raise ValueError(f"data.{target} must contain numeric labels")
 
@@ -717,6 +755,7 @@ def run_oof(
     input_names: list[str] | None = None,
     output_dir: Path,
     cache_dir: Path | None = None,
+    targets: Sequence[str] | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Generate OOF predictions using saved folds within pinned training data.
 
@@ -724,11 +763,15 @@ def run_oof(
     Fold assignments require inchikey_full and fold. Full keys identify rows;
     blocks keep related molecules together.
 
+    targets lists the scored target columns; it defaults to the challenge's.
+
     Returns predictions (model_id, inchikey_full, fold, target, pred) and
     truth (inchikey_full, fold, target, truth).
     """
 
-    data = _load_oof_data(data_path, folds_path)
+    targets = list(targets) if targets is not None else list(challenge().targets)
+
+    data = _load_oof_data(data_path, folds_path, targets=targets)
 
     if model_name not in REGISTRY:
         raise ValueError(f"Unknown model: {model_name}")
@@ -741,7 +784,7 @@ def run_oof(
 
     truth_rows = []
 
-    for target in _SCORED_DEFAULT:
+    for target in targets:
         for molecule, fold, value in data.select(
             "inchikey_full", "fold", target
         ).iter_rows():
@@ -795,7 +838,7 @@ def run_oof(
         "model_params": model_params,
         "input_names": input_names,
         "checkpoint_identities": checkpoint_identities,
-        "targets": _SCORED_DEFAULT,
+        "targets": targets,
     })
 
     fold_predictions = []
@@ -816,9 +859,10 @@ def run_oof(
                 model_id=model_id,
                 model_params=model_params,
                 input_names=input_names,
-                targets=_SCORED_DEFAULT,
+                targets=targets,
                 heldout_fold=fold,
                 cache_dir=cache_dir,
+                scored_targets=targets,
             )
 
         _run_fold_job(
@@ -828,6 +872,7 @@ def run_oof(
             model_id=model_id,
             heldout_fold=fold,
             generate_predictions=generate_predictions,
+            targets=targets,
         )
 
         fold_predictions.append(
@@ -860,10 +905,13 @@ def run_oof_seeds(
     output_dir: Path,
     cache_dir: Path | None = None,
     seeds: list[int],
+    targets: Sequence[str] | None = None,
 ) -> tuple[dict[int, pl.DataFrame], pl.DataFrame]:
     """Call run_oof for multiple seeds.
-    
+
     Models must accept random_state.
+
+    targets lists the scored target columns; it defaults to the challenge's.
     """
 
     if len(seeds) < 3:
@@ -900,6 +948,7 @@ def run_oof_seeds(
             input_names=input_names,
             output_dir=seed_output_dir,
             cache_dir=cache_dir,
+            targets=targets,
         )
         predictions_by_seed[seed] = predictions
 

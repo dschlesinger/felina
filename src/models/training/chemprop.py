@@ -169,7 +169,7 @@ class ChempropBackend(Backend):
             nargs="+",
             action="append",
             default=None,
-            metavar="NAME[:ISO,ISO]",
+            metavar="NAME[:TARGET,TARGET]",
             help="One training stage; repeat for several. Each stage starts from the previous stage's encoder. "
             "Name 'challenge' in a stage to train on the challenge labels there.",
         )
@@ -178,14 +178,14 @@ class ChempropBackend(Backend):
             nargs="+",
             action="append",
             default=None,
-            metavar="NAME[:ISO,ISO]",
+            metavar="NAME[:TARGET,TARGET]",
             help="Pretraining stage (repeat for several); use with --finetune. Shorthand for --stage.",
         )
         parser.add_argument(
             "--finetune",
             nargs="+",
             default=None,
-            metavar="NAME[:ISO,ISO]",
+            metavar="NAME[:TARGET,TARGET]",
             help="Final, evaluated stage after the --pretrain stages. Shorthand for the last --stage.",
         )
         for dest, flag in STAGE_FLAGS.items():

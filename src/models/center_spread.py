@@ -1,11 +1,11 @@
-"""Recentre and rescale predictions onto a target mean and standard deviation per isoform.
+"""Recentre and rescale predictions onto a target mean and standard deviation per target.
 
-Given a target mean and spread for an isoform's labels, this maps a set of predictions onto them:
+Given a mean and spread for a target's labels, this maps a set of predictions onto them:
 
     p' = mean + (std / sd(p)) * (p - mean(p))
 
 so the transformed predictions carry exactly that mean and standard deviation. This is moment
-matching, not a fit: no labels are used, only the two numbers supplied per isoform.
+matching, not a fit: no labels are used, only the two numbers supplied per target.
 
 It is a different objective from the least-squares map in `recalibrate.py`, and a worse one for
 squared error. The MSE-optimal affine map shrinks the spread to `r * std` (r being the correlation),
@@ -23,25 +23,43 @@ from pathlib import Path
 
 import numpy as np
 
-#: The CSV must have these columns; `isoform` takes either `3A4` or the full target column name.
-COLUMNS = ("isoform", "mean", "std")
+#: The CSV must have these columns; `target` takes either `3A4` or the full target column name.
+COLUMNS = ("target", "mean", "std")
 
-_SUFFIX = "_pIC50_direct_inhibition"
+#: Accepted in place of `target`, for CSVs written before the column was renamed.
+LEGACY_TARGET_COLUMN = "isoform"
 
 
-def _target_name(isoform: str) -> str:
-    """The full target column an `isoform` cell names, expanding the `3A4` and `CYP3A4` shorthands."""
-    name = isoform.strip()
-    if name.endswith(_SUFFIX):
+def _target_name(target: str) -> str:
+    """The full target column a `target` cell names.
+
+    A cell is matched against the challenge's own targets first — as a full column name, then as the
+    shorthand `DatasetSpec.shorthand` reports — so whichever dataset is scored names its columns itself.
+    Anything the spec does not know falls back to building the name from the suffix, which is what keeps
+    the bare `3A4` working for the CYP challenge, whose shorthands carry the `CYP` prefix.
+    """
+    from data_tools.datasets import challenge
+
+    name = target.strip()
+    spec = challenge()
+    if name in spec.targets:
         return name
-    return f"{name if name.upper().startswith('CYP') else 'CYP' + name}{_SUFFIX}".replace("cyp", "CYP", 1)
+    for known in spec.targets:
+        if name == spec.shorthand(known):
+            return known
+    suffix = spec.label_suffix
+    if suffix and name.endswith(suffix):
+        return name
+    return f"{name if name.upper().startswith('CYP') else 'CYP' + name}{suffix}".replace("cyp", "CYP", 1)
 
 
 def load_targets(path: Path) -> dict[str, tuple[float, float]]:
-    """Read `isoform,mean,std` rows into {target column: (mean, std)}.
+    """Read `target,mean,std` rows into {target column: (mean, std)}.
+
+    `isoform` is accepted in place of `target`, so CSVs written before the rename still load.
 
     Raises ValueError naming the problem for a missing column, an unreadable number, a non-positive
-    standard deviation, or the same isoform twice.
+    standard deviation, or the same target twice.
     """
     try:
         with Path(path).open(newline="", encoding="utf-8-sig") as stream:
@@ -50,12 +68,18 @@ def load_targets(path: Path) -> dict[str, tuple[float, float]]:
         raise ValueError(f"Cannot read the centre/spread CSV {path}: {exc}") from exc
     if not rows:
         raise ValueError(f"{path} has no rows; expected the columns {', '.join(COLUMNS)}")
-    missing = [c for c in COLUMNS if c not in (rows[0].keys() or {})]
+    header = rows[0].keys() or {}
+    # Prefer `target`; fall back to the old `isoform` header so existing CSVs keep working.
+    name_column = LEGACY_TARGET_COLUMN if COLUMNS[0] not in header and LEGACY_TARGET_COLUMN in header else COLUMNS[0]
+    missing = [c for c in (name_column, *COLUMNS[1:]) if c not in header]
     if missing:
-        raise ValueError(f"{path} has no column(s) {', '.join(missing)}; expected {', '.join(COLUMNS)}")
+        raise ValueError(
+            f"{path} has no column(s) {', '.join(missing)}; expected {', '.join(COLUMNS)}"
+            f" (`{LEGACY_TARGET_COLUMN}` is also accepted in place of `{COLUMNS[0]}`)"
+        )
     targets: dict[str, tuple[float, float]] = {}
     for number, row in enumerate(rows, start=2):  # row 1 is the header
-        target = _target_name(row["isoform"] or "")
+        target = _target_name(row[name_column] or "")
         try:
             mean, std = float(row["mean"]), float(row["std"])
         except (TypeError, ValueError) as exc:

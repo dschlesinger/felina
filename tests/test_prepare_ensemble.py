@@ -2,10 +2,13 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
-from data_tools.prepare_ensemble import prepare_ensemble_data, SCORED_TARGETS
+from data_tools.datasets import challenge
+from data_tools.prepare_ensemble import prepare_ensemble_data
 from data_tools.standardize import connectivity_keys, stereo_keys
 from data_tools.prepare_ensemble import make_oof_folds
 from data_tools.split_column import _scaffold_groups, _butina_groups
+
+SCORED_TARGETS = list(challenge().targets)
 
 
 @pytest.fixture

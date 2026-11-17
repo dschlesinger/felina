@@ -4,6 +4,7 @@ Provide R² quality filtering, held-out/OOF RAE-ratio filtering, and
 correlation-based model deduplication for ensemble selection.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -11,30 +12,33 @@ import polars as pl
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
+from data_tools.datasets import challenge
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from models import REGISTRY
 from models.utils import drop_nan_rows
 
 
-_SCORED_DEFAULT = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-]
-
 def validation_prediction(
     df: pl.DataFrame,
-    model_name: str, 
-    model_id: str, 
+    model_name: str,
+    model_id: str,
     model_params: dict,
     input_names: list[str],
     targets: list[str],
-    cache_dir: Path, 
+    cache_dir: Path,
+    *,
+    scored_targets: Sequence[str] | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """This handles feature-based models only and returns only validation
     rows with observed finite labels.
+
+    scored_targets lists the target columns the challenge is scored on; the
+    requested targets must be exactly those. It defaults to the challenge's.
     """
+
+    scored_targets = (
+        list(scored_targets) if scored_targets is not None else list(challenge().targets)
+    )
 
     if "split" not in df.columns:
         raise ValueError("split column must exist")
@@ -69,7 +73,7 @@ def validation_prediction(
         if missing:
             raise ValueError(f"{name} data missing columns: {sorted(missing)}")
 
-    unexpected = set(targets) - set(_SCORED_DEFAULT)
+    unexpected = set(targets) - set(scored_targets)
     if unexpected:
         raise ValueError(f"Unexpected targets: {sorted(unexpected)}")
 
@@ -112,7 +116,7 @@ def validation_prediction(
     if not isinstance(model_id, str) or not model_id.strip():
         raise ValueError("model_id must be a nonblank string")
             
-    allowed_targets = set(_SCORED_DEFAULT)
+    allowed_targets = set(scored_targets)
     missing_targets = allowed_targets - set(targets)
     if missing_targets:
         raise ValueError(
@@ -246,13 +250,15 @@ def run_validation_seeds(
     output_dir: Path,
     cache_dir: Path | None = None,
     seeds: list[int],
-    targets: list[str]
+    targets: list[str],
+    scored_targets: Sequence[str] | None = None,
 ) -> tuple[dict[int, pl.DataFrame], pl.DataFrame]:
     """Returns per-seed predictions and shared truth, without averaging.
 
     Feature models must support random state.
 
-    targets lists the target columns to predict.
+    targets lists the target columns to predict. scored_targets lists the
+    target columns the challenge is scored on; it defaults to the challenge's.
     """
 
     if len(seeds) < 3:
@@ -295,6 +301,7 @@ def run_validation_seeds(
             input_names=input_names,
             targets=targets,
             cache_dir=cache_dir,
+            scored_targets=scored_targets,
         )
 
         predictions_by_seed[seed] = predictions

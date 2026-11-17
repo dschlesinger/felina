@@ -1,7 +1,7 @@
 """Merge selected datasets into one wide multi-task table at training time.
 
 Joins on the fly for whichever sources a run asks for, so experiments can mix
-sources without rebuilding anything. Every source x isoform x readout becomes its own column
+sources without rebuilding anything. Every source x target x readout becomes its own column
 (its own head): `CYP2D6-BindingDB`, `CYP3A4-TDI`, `CYP1A2-PubChem`, ... No
 measurements are pooled across sources.
 
@@ -27,7 +27,7 @@ from pathlib import Path
 import polars as pl
 
 from data_tools.dataset_spec import Source
-from data_tools.datasets import registry
+from data_tools.datasets import challenge, registry
 from data_tools.overlap import add_keys, add_stereo_keys, collapse_duplicates, overlap_report
 from data_tools.split_column import _SPLIT_COLUMN, assign_blindlike_splits, assign_splits
 from data_tools.paths import DATA_DIR
@@ -35,7 +35,24 @@ from data_tools.paths import DATA_DIR
 _KEY = "inchikey_block"
 _STEREO_KEY = "inchikey_full"
 _NAME = "Molecule_Name"
-_SCORED_SOURCE = "challenge"
+
+
+def scored_source() -> str:
+    """The name of the training source the scored dataset declares: the one carrying the scored heads.
+
+    Read from the spec rather than hard-coded, so a different challenge needs no change here. The scored
+    dataset must declare exactly one source; zero leaves nothing to score and several leave it ambiguous.
+    """
+    spec = challenge()
+    names = list(spec.sources)
+    if len(names) != 1:
+        found = ", ".join(names) if names else "none"
+        raise ValueError(
+            f"the scored dataset {spec.name!r} must declare exactly one training source carrying its "
+            f"scored heads; it declares {len(names)} ({found})"
+        )
+    return names[0]
+
 
 
 SOURCES: dict[str, Source] = {
@@ -44,12 +61,12 @@ SOURCES: dict[str, Source] = {
 
 
 def parse_dataset_specs(specs: list[str], with_challenge: bool = True) -> dict[str, list[str] | None]:
-    """Parse `NAME` or `NAME:ISO,ISO` into {name: isoform filter or None}.
+    """Parse `NAME` or `NAME:TARGET,TARGET` into {name: target filter or None}.
 
     `challenge` is present and first unless with_challenge is False: it
     carries the scored heads and the split.
     """
-    parsed: dict[str, list[str] | None] = {_SCORED_SOURCE: None} if with_challenge else {}
+    parsed: dict[str, list[str] | None] = {scored_source(): None} if with_challenge else {}
     for spec in specs:
         name, _, isos = spec.partition(":")
         if name not in SOURCES:
@@ -59,18 +76,18 @@ def parse_dataset_specs(specs: list[str], with_challenge: bool = True) -> dict[s
     return parsed
 
 
-def _select_heads(df: pl.DataFrame, source: Source, isoforms: list[str] | None) -> dict[str, str]:
+def _select_heads(df: pl.DataFrame, source: Source, targets: list[str] | None) -> dict[str, str]:
     """Map existing column -> head name for every column the source defines."""
     mapping: dict[str, str] = {}
     for column in df.columns:
         for pattern, template in source.heads:
             match = re.match(pattern, column)
-            if match and (isoforms is None or match.group(1) in isoforms):
+            if match and (targets is None or match.group(1) in targets):
                 mapping[column] = template.format(match.group(1))
     return mapping
 
 
-def _load(source: Source, data_dir: Path, isoforms: list[str] | None) -> tuple[pl.DataFrame, list[str]]:
+def _load(source: Source, data_dir: Path, targets: list[str] | None) -> tuple[pl.DataFrame, list[str]]:
     """Read a source and return (frame with SMILES [+ Molecule_Name] + renamed heads, head names)."""
     path = data_dir / source.filename
     if not path.exists():
@@ -79,9 +96,9 @@ def _load(source: Source, data_dir: Path, isoforms: list[str] | None) -> tuple[p
     df = pl.read_csv(path, infer_schema_length=None)
     if source.prepare is not None:
         df = source.prepare(df)
-    mapping = _select_heads(df, source, isoforms)
+    mapping = _select_heads(df, source, targets)
     if not mapping:
-        raise ValueError(f"no heads from {source.filename} match isoforms {isoforms}")
+        raise ValueError(f"no heads from {source.filename} match targets {targets}")
     keep = [c for c in (_NAME, "SMILES") if c in df.columns]
     out = df.select(keep + list(mapping)).rename(mapping)
     if source.log10p1:
@@ -111,19 +128,20 @@ def merge(
     tasks: dict[str, str] = {}
     inhouse: pl.DataFrame | None = None
     smiles_by_name: list[pl.DataFrame] = []
+    scored_name = scored_source()
 
-    for name, isoforms in datasets.items():
+    for name, targets in datasets.items():
         source = SOURCES[name]
         if source.kind != "inhouse":
             continue
-        frame, names = _load(source, data_dir, isoforms)
+        frame, names = _load(source, data_dir, targets)
         print(f"  {name}: {len(frame)} rows, heads {names}", file=sys.stderr)
         smiles_by_name.append(frame.select([_NAME, "SMILES"]))
         frame = frame.drop("SMILES")
         inhouse = frame if inhouse is None else inhouse.join(frame, on=_NAME, how="full", coalesce=True)
         heads += names
         tasks.update({n: source.task for n in names})
-        if name == _SCORED_SOURCE:
+        if name == scored_name:
             scored = names
 
     smiles = pl.concat(smiles_by_name).unique(subset=[_NAME], keep="first", maintain_order=True)
@@ -162,11 +180,11 @@ def merge(
         )
     table = table.with_columns(splits)
 
-    for name, isoforms in datasets.items():
+    for name, targets in datasets.items():
         source = SOURCES[name]
         if source.kind != "external":
             continue
-        frame, names = _load(source, data_dir, isoforms)
+        frame, names = _load(source, data_dir, targets)
         frame = collapse_duplicates(add_keys(frame), names)
         if source.task == "classification":
             # Averaging duplicate 0/1 labels can give 0.5; settle ties towards positive.
@@ -201,6 +219,6 @@ def describe() -> str:
     """One line per selectable dataset, for --list-datasets."""
     lines = [f"{name:26s} {src.kind:9s} {src.task:14s} {src.description}" for name, src in SOURCES.items()]
     lines.append("")
-    lines.append("Restrict a dataset to isoforms with NAME:ISO,ISO  e.g. bindingdb:CYP2D6,CYP1A2")
-    lines.append("Heads are named {isoform}-{source}, e.g. CYP2D6-BindingDB, CYP3A4-TDI.")
+    lines.append("Restrict a dataset to targets with NAME:TARGET,TARGET  e.g. bindingdb:CYP2D6,CYP1A2")
+    lines.append("Heads are named {target}-{source}, e.g. CYP2D6-BindingDB, CYP3A4-TDI.")
     return "\n".join(lines)

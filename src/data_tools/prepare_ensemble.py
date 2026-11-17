@@ -6,24 +6,29 @@ Preserve existing train/validation/test assignments.
 """
 
 import random
+from collections.abc import Sequence
 from typing import Literal
 
 import polars as pl
 
+from data_tools.datasets import challenge
 from data_tools.split_column import _butina_groups, _scaffold_groups
 from data_tools.standardize import connectivity_keys, stereo_keys
 
-SCORED_TARGETS = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-]
 
-def prepare_ensemble_data(df: pl.DataFrame) -> pl.DataFrame:
-    """Validate prepared data and add verified molecule identifiers."""
-    
-    missing = {"SMILES", "split", *SCORED_TARGETS} - set(df.columns)
+def prepare_ensemble_data(
+    df: pl.DataFrame,
+    *,
+    targets: Sequence[str] | None = None,
+) -> pl.DataFrame:
+    """Validate prepared data and add verified molecule identifiers.
+
+    targets lists the scored target columns; it defaults to the challenge's.
+    """
+
+    targets = list(targets) if targets is not None else list(challenge().targets)
+
+    missing = {"SMILES", "split", *targets} - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {sorted(missing)}")
     if df.is_empty():
@@ -35,7 +40,7 @@ def prepare_ensemble_data(df: pl.DataFrame) -> pl.DataFrame:
     if (smiles.str.strip_chars() == "").any():
         raise ValueError("SMILES cannot be blank")
 
-    for target in SCORED_TARGETS:
+    for target in targets:
         values = df[target]
         if values.dtype != pl.Null and not values.dtype.is_numeric():
             raise ValueError(f"{target} must be numeric")
@@ -75,19 +80,23 @@ def make_oof_folds(
     *,
     strategy: Literal["scaffold", "butina", "random"] = "scaffold",
     n_folds: int = 5, # consider making it 10
-    seed: int = 0, 
+    seed: int = 0,
     butina_cutoff: float = 0.4,
-
+    targets: Sequence[str] | None = None,
 ) -> pl.DataFrame:
     """Expects prepared data. Create OOF folds within pinned training data.
 
     Keep scaffold/Butina groups or randomized connectivity blocks together.
-    Require usable labels for all four scored targets in each fold's
+    Require usable labels for every scored target in each fold's
     training and held-out populations.
+
+    targets lists the scored target columns; it defaults to the challenge's.
 
     Return inchikey_full, fold, and oof_group . The caller saves the assignments and
     settings (strategy, n_folds, seed, and Butina cutoff when applicable).
     """
+
+    targets = list(targets) if targets is not None else list(challenge().targets)
 
     if isinstance(n_folds, bool) or not isinstance(n_folds, int) or n_folds < 2:
         raise ValueError("n_folds must be an integer >= 2")
@@ -157,7 +166,7 @@ def make_oof_folds(
             ("held-out", assigned.filter(pl.col("fold") == fold)),
             ("training", assigned.filter(pl.col("fold") != fold)),
         ]:
-            for target in SCORED_TARGETS:
+            for target in targets:
                 labels = population[target].cast(pl.Float64)
                 observed = (
                     labels.is_not_null() & labels.is_finite()

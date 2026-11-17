@@ -425,9 +425,14 @@ def assign_blindlike_splits(
     return pl.Series(_BLINDLIKE_COLUMN, assignment), report
 
 
-_SCORED_DEFAULT = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-]
+def _scored_default() -> list[str]:
+    """The scored label columns, read from the challenge's dataset spec.
+
+    Looked up on every call rather than frozen at import: `CHALLENGE_DATASET` can point at another scored
+    dataset after this module is imported, and a snapshot would miss it. The import is deferred to the call
+    for the same reason it is deferred elsewhere here — `data_tools.datasets` imports every dataset module,
+    and those import `data_tools.fetchers`.
+    """
+    from data_tools.datasets import challenge
+
+    return list(challenge().targets)

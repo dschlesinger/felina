@@ -31,11 +31,28 @@ hundreds of proteins, and for `pubchem_aid1851`, whose raw table is ~24 MB.
 
 Each dataset lives under `src/data_tools/dataset_defs/` and holds everything it needs: its source URL, its `fetch`
 step, an optional `derive` step, the files each writes, and the training heads the result offers (`--datasets
-NAME:ISO`). A simple dataset is one module (`train.py`); one that brings its own crawling or reshaping code is a
+NAME:TARGET`). A simple dataset is one module (`train.py`); one that brings its own crawling or reshaping code is a
 directory holding that code next to the spec (`pubchem_aid1851/`, `p450_family/`); `metabolism/` just groups
 related datasets. Adding a dataset means adding a module there and changing nothing else —
 `data_tools.datasets.registry()` discovers it, `data list` shows it, and `--datasets` accepts it. See
 `src/data_tools/dataset_spec.py` for the fields.
+
+### The scored dataset
+
+One dataset declares `scored=True`: the challenge being evaluated. It carries the target columns, the
+molecule and identifier column names, the suffix trimmed off a target for display, and the name of the
+dataset holding its blinded molecules. `data_tools.datasets.challenge()` returns it, and every evaluator
+reads the scored columns from there rather than holding its own copy, so the target list exists in exactly
+one place (`src/data_tools/dataset_defs/train.py`).
+
+Switching challenge is a new scored dataset module plus `CHALLENGE_DATASET` naming it:
+
+```bash
+CHALLENGE_DATASET=pxr_train evaluate-models --input morgan
+```
+
+Unset, the single dataset declaring `scored=True` is used; declaring two without setting the variable is an
+error that names both.
 
 `pubchem_aid1851` yields per-isoform auxiliary heads; `p450_family` (ChEMBL + BindingDB, Pfam PF00067) yields one
 `{gene}_{readout}_{source}` head per protein per source (IC50 only by default, so `{gene}_pIC50_{source}`).
@@ -82,13 +99,13 @@ train-model --model chemprop --pretrain tdc_hlm --finetune challenge pubchem:CYP
 ```
 
 `--datasets` takes any name from `train-model --list-datasets` (`challenge`, `pubchem`,
-`bindingdb`, `tdi`, `tdc_hlm`, ...), as `NAME[:ISO,ISO]`; heads are named
-`{isoform}-{source}`. Only what you list is trained on: `--datasets challenge` is the
+`bindingdb`, `tdi`, `tdc_hlm`, ...), as `NAME[:TARGET,TARGET]`; heads are named
+`{target}-{source}`. Only what you list is trained on: `--datasets challenge` is the
 challenge labels alone, `--datasets challenge pubchem` is both, and `--datasets pubchem`
 is the auxiliary data alone. The challenge data is still loaded in every case,
 since it provides the pinned train/val split and the validation molecules; with
 no `challenge` in the config its labels are just not trained on. For `unimol`, each
-challenge head is then scored with the same-isoform auxiliary head, so that RMSE carries a
+challenge head is then scored with the same-target auxiliary head, so that RMSE carries a
 cross-assay calibration offset. Each head keeps its own scale and missing labels
 are masked in the loss. With several runs, outputs go to
 `<output-dir>/<config>/seed<N>` (default `results/chemprop/`, `results/chemprop/chemeleon/`, `results/unimol/`, `results/atom_jepa/` or `results/atom_jepa_bio/`). Shared flags:
@@ -167,11 +184,11 @@ results/runs/0095__eval__input=maccs_models=ridge_nfolds=3/
     member_predictions.csv   # --member-predictions-out
 ```
 
-`--member-predictions-out` (with `--nfolds`) saves one row per molecule per fitted model (`smiles, isoform, model,
+`--member-predictions-out` (with `--nfolds`) saves one row per molecule per fitted model (`smiles, target, model,
 input, seed, fold, role, y_true, y_pred`), where `role` is `fit` for the rows that model was trained on and `holdout`
 for the fold it was held out of. The `holdout` rows are exactly what an affine recalibration is fitted on, so any
 post-hoc calibration can be refitted from the CSV without retraining anything. It is off by default, since predicting
-on the fit rows is extra inference and the file grows with models x inputs x isoforms x seeds x folds.
+on the fit rows is extra inference and the file grows with models x inputs x targets x seeds x folds.
 
 Flags that write a file take an optional path: bare (`--predictions-out`) writes the default name in the run folder,
 and with a path it writes there instead. `train-model` puts its checkpoints and metrics in the run folder too, unless
@@ -213,7 +230,15 @@ expensive one (results are cached in `data/features/`). Worker processes come fr
 `XTB_NJOBS`, else `NSLOTS` (SGE), else the CPU count. Request both blocks in one
 call (`--input xtb_solv_v1 xtb_elec_v1`) to compute each molecule once.
 
+There is no flag for which dataset is scored: the scored dataset spec names it and its target columns, and
+`CHALLENGE_DATASET` points at another (see The scored dataset). `--targets` only narrows which of its
+targets a run scores. It accepts a target's full column name, its shorthand (`CYP2D6` for
+`CYP2D6_pIC50_direct_inhibition`), or any unambiguous tail of one (`2D6`); matching ignores case, and a
+name that matches nothing is refused with the valid choices listed. One model is fitted per target, so
+narrowing is a compute lever as well as a reporting one.
+
 ```bash
+evaluate-models --targets 2D6 3A4                       # two of the scored targets
 evaluate-models --input morgan                          # one representation
 evaluate-models --input count_morgan rdkit --split butina --seed 0
 evaluate-models --input all                             # every representation on its own, one table
@@ -233,15 +258,15 @@ same `Molecule_Name` and target columns can be scored.
 validation predictions for every selected model, input set, and target — bare it writes
 `predictions.csv` in the run folder, or pass a path. When blind-set
 predictions are computed, via `--predict-blind` or `--plots train-test`, it also writes a
-sibling `<stem>.blind.csv`, `molecule,isoform,model,input,split,seed,y_pred`, which
+sibling `<stem>.blind.csv`, `molecule,target,model,input,split,seed,y_pred`, which
 `plot-results` reads; `--predict-blind` separately writes one
 `<run folder>/<model>_<input>_blind_predictions.csv` per model and input:
 
 ```text
-smiles,isoform,model,input,split,seed,y_true,y_pred
+smiles,target,model,input,split,seed,y_true,y_pred
 ```
 
-`smiles` preserves the source `SMILES` string; `isoform` is the full target
+`smiles` preserves the source `SMILES` string; `target` is the full target
 column name and `model` is its registry name. Combined inputs use their ordered
 names joined with ` + ` (for example, `count_morgan + rdkit`); `--input all`
 produces separate groups. `split` records the executed strategy (`random`,
@@ -256,7 +281,7 @@ exported. Non-finite feature values are first set to 0 (with a warning on stderr
 `drop_nan_rows` drops rows with a non-finite label, selecting features, labels,
 and SMILES together and retaining their order. Every surviving
 row is saved, even if another representation drops that molecule. Duplicate
-source SMILES within a `(model, input, isoform, split, seed)` group cause export
+source SMILES within a `(model, input, target, split, seed)` group cause export
 to fail with an explicit error before writing; rows are never deduplicated.
 Repeated selections that duplicate the same group also fail. Without the flag,
 evaluation retains its existing behavior, including duplicate rows.
@@ -390,17 +415,18 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
   for the unadjusted predictions and once as `<model> [affine]`, so the
   adjustment can be read off directly; everything a run exports (predictions,
   plots, blind predictions) uses the recalibrated one.
-  An `affine` plot is drawn per isoform and model, showing the out-of-fold
+  An `affine` plot is drawn per target and model, showing the out-of-fold
   predictions before and after the map with each cloud's trend line; it can also
   be asked for on its own with `--plots affine`, which fits the map for the plot
   without applying it to the scores. Both need `--nfolds`.
   The maps are also written to `affine.csv` in the run folder, one row per
-  (isoform, model, input) with the `split`, `seed` and `n_oof` they were fitted
+  (target, model, input) with the `split`, `seed` and `n_oof` they were fitted
   under. A small `n_oof` means a noisy slope. `--affine-out <path>` writes them
   somewhere else instead; either way an existing file is never overwritten.
 - `--center-spread moments.csv`: recentre and rescale every prediction set onto a
-  target mean and standard deviation per isoform, read from a CSV with the columns
-  `isoform,mean,std` (`3A4` or the full target column name). Each set is mapped so it
+  target mean and standard deviation per target, read from a CSV with the columns
+  `target,mean,std` (`3A4` or the full target column name; a CSV written before the
+  rename, whose first column is headed `isoform`, is still accepted). Each set is mapped so it
   carries exactly that mean and spread, with the cross-validation folds sharing the
   pooled out-of-fold scaling; the transformed predictions are what the run exports, and
   each model is also scored untransformed as a comparison row. Being monotone, it leaves

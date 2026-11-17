@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
+from data_tools.datasets import challenge
 import models.validation as validation
 from models.validation import (
     validation_prediction,
@@ -576,7 +577,7 @@ def test_validation_rejects_invalid_predictions(
 
 @pytest.fixture
 def validation_seed_setup(tmp_path, monkeypatch):
-    targets = list(validation._SCORED_DEFAULT)
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A", "VAL_A", "VAL_B"],

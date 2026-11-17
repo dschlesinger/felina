@@ -14,7 +14,8 @@ from rich.markup import escape
 from rich.table import Table
 
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
-from data_tools.load import load_data, load_test, load_train
+from data_tools.datasets import challenge
+from data_tools.load import load_data, load_test, load_train, test_file, train_file
 from representations.embedding_metrics import evaluate_embedding, evaluate_shift, fingerprint_shift
 from representations.foundation_alias import ALIAS_FILE, load_aliases, set_alias
 from data_tools.paths import DATA_DIR, FEATURE_DIR
@@ -25,7 +26,7 @@ console = Console()
 
 def _molecules(data_dir: Path) -> pl.DataFrame:
     """Unique SMILES of the challenge train and blinded test sets: what evaluate-models featurizes."""
-    frames = [load_train(data_dir / "train.csv").select("SMILES"), load_test(data_dir / "test.csv").select("SMILES")]
+    frames = [load_train(data_dir / train_file()).select("SMILES"), load_test(data_dir / test_file()).select("SMILES")]
     return pl.concat(frames).unique(subset=["SMILES"], keep="first", maintain_order=True)
 
 
@@ -103,7 +104,6 @@ def _check(cache_dir: Path, smiles: set[str] | None) -> None:
     console.print(table)
 
 
-_TARGET_SUFFIX = "_pIC50_direct_inhibition"
 _BASELINE = "morgan"
 _METRIC_LEGEND = (
     "Probe/kNN R2: val R2 of ridge / 5-NN on the embedding (higher better). "
@@ -145,7 +145,8 @@ def _evaluate(args: argparse.Namespace) -> None:
         butina_cutoff=args.butina_cutoff,
         data_dir=args.data_dir,
     )
-    targets = [c for c in train_df.columns if c.endswith(_TARGET_SUFFIX)]
+    scored = set(challenge().targets)
+    targets = [c for c in train_df.columns if c in scored]
     if args.targets:
         missing = [t for t in args.targets if t not in targets]
         if missing:
@@ -162,16 +163,16 @@ def _evaluate(args: argparse.Namespace) -> None:
     y_train_all = {t: train_df[t].cast(pl.Float64).to_numpy() for t in targets}
     y_val_all = {t: val_df[t].cast(pl.Float64).to_numpy() for t in targets}
 
-    if args.test and not (args.data_dir / "test.csv").exists():
-        print(f"{args.data_dir / 'test.csv'} not found, skipping the test distances (use --no-test to silence)", file=sys.stderr)
+    if args.test and not (args.data_dir / test_file()).exists():
+        print(f"{args.data_dir / test_file()} not found, skipping the test distances (use --no-test to silence)", file=sys.stderr)
         args.test = False
     if args.test:
-        # the model that is submitted trains on all of train.csv, so the test set is measured against all of it
+        # the model that is submitted trains on all of the scored file, so the test set is measured against all of it
         full_df = pl.concat([train_df, val_df])
-        test_df = load_test(args.data_dir / "test.csv")
+        test_df = load_test(args.data_dir / test_file())
         fp_full_all = featurize(full_df, [_BASELINE], args.cache_dir)
         fp_test_all = featurize(test_df, [_BASELINE], args.cache_dir)
-        console.print(f"[dim]test: {len(test_df)} molecules against all {len(full_df)} train.csv molecules[/]")
+        console.print(f"[dim]test: {len(test_df)} molecules against all {len(full_df)} {train_file()} molecules[/]")
 
     rows: list[tuple[str, dict[str, float]]] = []
     test_rows: list[tuple[str, dict[str, float]]] = []
@@ -234,7 +235,7 @@ def _evaluate(args: argparse.Namespace) -> None:
         "Train to val distance": ([*shift_columns, ("Err rho", "err_dist_rho", 3)], rows),
     }
     if args.test:
-        groups["Train to test distance (test.csv vs all of train.csv)"] = (shift_columns, test_rows)
+        groups[f"Train to test distance ({test_file()} vs all of {train_file()})"] = (shift_columns, test_rows)
     for title, (columns, group_rows) in groups.items():
         table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", pad_edge=False, title=title, title_style="bold")
         table.add_column("Representation", style="bold", overflow="fold", min_width=12)
@@ -273,7 +274,7 @@ def _run() -> None:
         "--test",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="With --evaluate, also measure the blinded data/test.csv against all of train.csv "
+        help=f"With --evaluate, also measure the blinded {DATA_DIR.name}/{test_file()} against all of {train_file()} "
         "(distance metrics only: NN ratio, Out, AUC, MMD p; no labels are needed). Default on; --no-test skips it",
     )
     parser.add_argument("--split", default="scaffold", choices=["random", "scaffold", "butina"], help="Split for --evaluate (default: scaffold)")
@@ -302,7 +303,7 @@ def _run() -> None:
         help="Give a foundation-model weights path (or a monroe checkpoint directory) a short alias, usable as "
         f"chemprop[ALIAS], unimol[ALIAS], atom_jepa[ALIAS] or monroe[ALIAS]. Saved in {ALIAS_FILE}.",
     )
-    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory containing train.csv and test.csv")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help=f"Directory containing {train_file()} and {test_file()}")
     parser.add_argument("--cache-dir", type=Path, default=FEATURE_DIR, help="Directory for cached feature matrices")
     args = parser.parse_args()
 
@@ -350,7 +351,7 @@ def _run() -> None:
         _evaluate(args)
 
     if args.check:
-        smiles = set(_molecules(args.data_dir)["SMILES"].to_list()) if (args.data_dir / "train.csv").exists() else None
+        smiles = set(_molecules(args.data_dir)["SMILES"].to_list()) if (args.data_dir / train_file()).exists() else None
         _check(args.cache_dir, smiles)
 
 

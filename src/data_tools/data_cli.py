@@ -47,8 +47,8 @@ def _natural(name: str) -> list:
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
 
 
-def _isoforms(source: Source, data_dir: Path) -> list[str] | None:
-    """CYP isoforms a training source offers as `NAME:ISO`; None if its file is missing."""
+def _targets(source: Source, data_dir: Path) -> list[str] | None:
+    """Targets a training source offers as `NAME:TARGET`; None if its file is missing."""
     path = data_dir / source.filename
     if not path.is_file():
         return None
@@ -75,15 +75,15 @@ def _list(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
         table.add_column(column, justify="right" if column in ("rows", "size") else "left", no_wrap=True)
     table.add_column("description", overflow="ellipsis", no_wrap=True, max_width=40)
     table.add_column("train as", no_wrap=True)
-    table.add_column("isoforms", overflow="fold")
+    table.add_column("targets", overflow="fold")
     for dataset in datasets.values():
         status = _status(dataset, args.data_dir)
         primary = args.data_dir / dataset.primary
         ready = primary.is_file()
-        # Training sources (`--datasets NAME:ISO`) this dataset offers; a dataset may offer none.
+        # Training sources (`--datasets NAME:TARGET`) this dataset offers; a dataset may offer none.
         sources = list(dataset.sources.items()) or [("-", None)]
         for i, (train_name, source) in enumerate(sources):
-            isoforms = _isoforms(source, args.data_dir) if source is not None else []
+            targets = _targets(source, args.data_dir) if source is not None else []
             first = i == 0
             table.add_row(
                 dataset.name if first else "",
@@ -96,7 +96,7 @@ def _list(args: argparse.Namespace, datasets: dict[str, Dataset]) -> None:
                 _size(primary) if first and ready else "",
                 dataset.description if first else "",
                 train_name,
-                "[dim]not fetched[/]" if isoforms is None else ", ".join(isoforms) if isoforms else "none",
+                "[dim]not fetched[/]" if targets is None else ", ".join(targets) if targets else "none",
             )
     console.print(table)
 

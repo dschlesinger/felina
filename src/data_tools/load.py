@@ -7,7 +7,8 @@ from typing import Literal
 import numpy as np
 import polars as pl
 
-from data_tools.split_column import _SCORED_DEFAULT, _butina_groups, _scaffold_groups, assign_blindlike_splits
+from data_tools.datasets import blind_spec, challenge
+from data_tools.split_column import _butina_groups, _scaffold_groups, _scored_default, assign_blindlike_splits
 from data_tools.paths import DATA_DIR
 
 _DEFAULT_DATA_DIR = DATA_DIR
@@ -18,21 +19,34 @@ _DEFAULT_DATA_DIR = DATA_DIR
 # whole file.
 _INFER_ALL = None
 
-_TRAIN_FILE = "train.csv"
-_TEST_FILE = "test.csv"
 _TDI_TRAIN_FILE = "tdi_train.csv"
 _EMAX_TRAIN_FILE = "emax_train.csv"
 _SINGLE_CONC_TRAIN_FILE = "single_concentration_train.csv"
 
 
-def load_train(path: Path = _DEFAULT_DATA_DIR / _TRAIN_FILE) -> pl.DataFrame:
+def train_file() -> str:
+    """Name of the scored dataset's model-ready file, relative to the data directory."""
+    return challenge().primary
+
+
+def test_file() -> str:
+    """Name of the blind set's file, relative to the data directory."""
+    blind = blind_spec()
+    if blind is None:
+        raise ValueError(f"the scored dataset {challenge().name!r} names no blind set to load")
+    return blind.primary
+
+
+def load_train(path: Path | None = None) -> pl.DataFrame:
     """Return the direct-inhibition training split as a Polars DataFrame."""
-    return pl.read_csv(path, infer_schema_length=_INFER_ALL)
+    # Resolved here, not in the signature: a default argument is evaluated at import, which would pin the
+    # file before CHALLENGE_DATASET could choose another scored dataset.
+    return pl.read_csv(path if path is not None else _DEFAULT_DATA_DIR / train_file(), infer_schema_length=_INFER_ALL)
 
 
-def load_test(path: Path = _DEFAULT_DATA_DIR / _TEST_FILE) -> pl.DataFrame:
+def load_test(path: Path | None = None) -> pl.DataFrame:
     """Return the blinded test split as a Polars DataFrame."""
-    return pl.read_csv(path, infer_schema_length=_INFER_ALL)
+    return pl.read_csv(path if path is not None else _DEFAULT_DATA_DIR / test_file(), infer_schema_length=_INFER_ALL)
 
 
 def load_tdi_train(path: Path = _DEFAULT_DATA_DIR / _TDI_TRAIN_FILE) -> pl.DataFrame:
@@ -155,7 +169,7 @@ def _blind_matched_split(
     reference = pl.read_csv(test_path, infer_schema_length=_INFER_ALL)["SMILES"].to_list()
     splits, _ = assign_blindlike_splits(
         df,
-        _SCORED_DEFAULT,
+        _scored_default(),
         reference,
         val_fraction=val_fraction,
         test_fraction=0.0,
@@ -184,14 +198,14 @@ def load_data(
       'blind_matched' — held-out slice imitates data/test.csv (75% novel scaffolds, close to train);
                         scores ~0.013 lower than 'scaffold' and is not comparable to it
     """
-    df = load_train(data_dir / _TRAIN_FILE)
+    df = load_train(data_dir / train_file())
 
     if split_type == "scaffold":
         return _scaffold_split(df, val_fraction, seed)
     if split_type == "butina":
         return _butina_split(df, val_fraction, seed, butina_cutoff)
     if split_type == "blind_matched":
-        return _blind_matched_split(df, val_fraction, seed, data_dir / _TEST_FILE)
+        return _blind_matched_split(df, val_fraction, seed, data_dir / test_file())
     return _random_split(df, val_fraction, seed)
 
 

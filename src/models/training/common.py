@@ -1,7 +1,7 @@
 """Data handling shared by every training backend.
 
-Datasets are chosen with `--datasets NAME[:ISO,ISO]` and merged at run time into
-one wide table with a head per source x isoform. The `challenge` data is always
+Datasets are chosen with `--datasets NAME[:TARGET,TARGET]` and merged at run time into
+one wide table with a head per source x target. The `challenge` data is always
 loaded (it supplies the four scored heads and the pinned split) but is trained on only when listed.
 """
 
@@ -13,14 +13,14 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
 
-from data_tools.merge_datasets import merge
+from data_tools.merge_datasets import merge, scored_source
 from data_tools.overlap import add_keys
 from data_tools.paths import DATA_DIR
 
 
 def slug(specs: list[str]) -> str:
     """Directory-safe name for a list of dataset specs."""
-    return "+".join(specs).replace(":", "-").replace(",", "_") or "challenge"
+    return "+".join(specs).replace(":", "-").replace(",", "_") or scored_source()
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -30,10 +30,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         action="append",
         default=None,
-        metavar="NAME[:ISO,ISO]",
+        metavar="NAME[:TARGET,TARGET]",
         help="One dataset config; repeat --datasets for several. Only the datasets you list are trained on: names are those of --list-datasets, so --datasets challenge pubchem:CYP1A2 trains on both and --datasets pubchem:CYP1A2 on the "
-        "auxiliary data alone (the challenge heads are then scored with the same-isoform auxiliary head). Heads are "
-        "named {isoform}-{source}, e.g. bindingdb:CYP2D6,CYP1A2 tdi. Every config is trained once per seed.",
+        "auxiliary data alone (the challenge heads are then scored with the same-target auxiliary head). Heads are "
+        "named {target}-{source}, e.g. bindingdb:CYP2D6,CYP1A2 tdi. Every config is trained once per seed.",
     )
     parser.add_argument("--list-datasets", action="store_true", help="List selectable datasets and exit")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Where the source CSVs live (default: DATA_FOLDER, else data)")
@@ -65,7 +65,9 @@ def merge_stage(specs: dict[str, list[str] | None], args: argparse.Namespace):
     Returns (table, heads, scored, tasks) exactly as data_tools.merge_datasets.merge.
     """
     return merge(
-        {"challenge": None, **specs},  # always loaded for the pinned split and scoring; its labels train only if listed
+        # The scored dataset's source is always loaded for the pinned split and scoring; its labels train
+        # only if listed.
+        {scored_source(): None, **specs},
         data_dir=args.data_dir,
         split_strategy=args.split_strategy,
         split_seed=args.split_seed,
@@ -93,7 +95,7 @@ def prepare_joint_split(
     if unknown:
         parser.error(f"--target-columns not among heads {heads}: {unknown}")
     if not args.use_challenge:
-        # Score each ADMET head with the first auxiliary head of the same isoform (CYP1A2-Direct <- CYP1A2-PubChem).
+        # Score each ADMET head with the first auxiliary head of the same target (CYP1A2-Direct <- CYP1A2-PubChem).
         eval_map = {}
         for head in scored:
             prefix = head.split("-")[0] + "-"
@@ -106,7 +108,7 @@ def prepare_joint_split(
     else:
         eval_map = {h: h for h in target_columns if h in scored}
     if not eval_map:
-        parser.error(f"nothing to score: need a scored head ({scored}) or an auxiliary head of the same isoform")
+        parser.error(f"nothing to score: need a scored head ({scored}) or an auxiliary head of the same target")
     if any(tasks[h] == "classification" for h in target_columns):
         print("  binary heads present: training as regression, 0/1 labels as numbers", file=sys.stderr)
 

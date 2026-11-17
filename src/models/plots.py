@@ -18,6 +18,11 @@ import numpy as np  # noqa: E402
 PLOT_KINDS = ["train-test", "heldout-skew", "affine"]
 
 
+# `target` replaced `isoform` in the exported predictions CSV; fall back for CSVs exported before the rename.
+def _target_of(row: dict) -> str:
+    return row["target"] if "target" in row else row["isoform"]
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^\w+.-]", "_", text.replace(" + ", "+"))
 
@@ -111,29 +116,29 @@ def _select(rows: list[dict]) -> list[dict]:
 
 
 def _grid(rows: list[dict], kind: str = "") -> tuple[list[str], list[tuple[str, str]], dict]:
-    """Isoform columns, (model, input) rows, and the (model, input, isoform) -> row lookup.
+    """Target columns, (model, input) rows, and the (model, input, target) -> row lookup.
 
     Rows missing what a kind needs (blind-set predictions, recalibrated out-of-fold ones) are left out.
     """
     if kind in _NEEDS:
         rows = [r for r in rows if r.get(_NEEDS[kind]) is not None]
-    isoforms = list(dict.fromkeys(r["target"] for r in rows))
+    targets = list(dict.fromkeys(r["target"] for r in rows))
     combos = list(dict.fromkeys((r["name"], r["input"]) for r in rows))
-    return isoforms, combos, {(r["name"], r["input"], r["target"]): r for r in rows}
+    return targets, combos, {(r["name"], r["input"], r["target"]): r for r in rows}
 
 
 def write_files(kinds: list[str], rows: list[dict], out_dir: Path) -> list[Path]:
-    """One PNG per (kind, isoform, model or ensemble, input)."""
+    """One PNG per (kind, target, model or ensemble, input)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for r in _select(rows):
-        isoform = r["target"].split("_")[0]
+        target = r["target"].split("_")[0]
         for kind in kinds:
             if kind in _NEEDS and r.get(_NEEDS[kind]) is None:
                 continue
-            path = out_dir / f"{kind}_{_slug(isoform)}_{_slug(r['name'])}_{_slug(r['input'])}.png"
+            path = out_dir / f"{kind}_{_slug(target)}_{_slug(r['name'])}_{_slug(r['input'])}.png"
             fig, ax = plt.subplots(figsize=(7, 4.5) if kind == "train-test" else (6, 6))
-            _DRAW[kind](ax, f"{isoform}: {r['name']} [{r['input']}]", r)
+            _DRAW[kind](ax, f"{target}: {r['name']} [{r['input']}]", r)
             fig.tight_layout()
             fig.savefig(path, dpi=200)
             plt.close(fig)
@@ -161,14 +166,14 @@ def image_protocol() -> str | None:
 
 
 def _montage_png(kind: str, rows: list[dict]) -> bytes:
-    """One figure: a column per isoform, a row per (model, input)."""
-    isoforms, combos, lookup = _grid(rows, kind)
+    """One figure: a column per target, a row per (model, input)."""
+    targets, combos, lookup = _grid(rows, kind)
     fig, axes = plt.subplots(
-        len(combos), len(isoforms), figsize=(4.2 * len(isoforms), (3.6 if kind == "train-test" else 4.2) * len(combos)),
+        len(combos), len(targets), figsize=(4.2 * len(targets), (3.6 if kind == "train-test" else 4.2) * len(combos)),
         squeeze=False,
     )
     for i, (name, input_label) in enumerate(combos):
-        for j, target in enumerate(isoforms):
+        for j, target in enumerate(targets):
             ax = axes[i][j]
             r = lookup.get((name, input_label, target))
             if r is None:
@@ -198,17 +203,17 @@ def _emit_image(png: bytes, protocol: str) -> None:
 
 
 def _text_grid(kind: str, rows: list[dict], min_width: int = 44) -> None:
-    """Braille/block plots with plotext: isoforms side by side while they fit, else wrapped two or more per row."""
+    """Braille/block plots with plotext: targets side by side while they fit, else wrapped two or more per row."""
     import plotext as plt_t
 
-    isoforms, combos, lookup = _grid(rows, kind)
+    targets, combos, lookup = _grid(rows, kind)
     total = shutil.get_terminal_size((120, 40)).columns
-    per_row = max(1, min(len(isoforms), total // min_width))
+    per_row = max(1, min(len(targets), total // min_width))
     height = 18
     for name, input_label in combos:
         print(f"\n{kind}: {name} [{input_label}]")
-        for start in range(0, len(isoforms), per_row):
-            chunk = isoforms[start : start + per_row]
+        for start in range(0, len(targets), per_row):
+            chunk = targets[start : start + per_row]
             plt_t.clf()
             plt_t.subplots(1, len(chunk))
             plt_t.plotsize(total, height)
@@ -313,12 +318,12 @@ def rows_from_predictions(
         grouped: dict[tuple[str, str, str], list[float]] = {}
         with blind.open(newline="", encoding="utf-8") as stream:
             for r in csv.DictReader(stream):
-                grouped.setdefault((r["model"], r["input"], r["isoform"]), []).append(float(r["y_pred"]))
+                grouped.setdefault((r["model"], r["input"], _target_of(r)), []).append(float(r["y_pred"]))
         blind_preds = {k: np.asarray(v) for k, v in grouped.items()}
 
     val: dict[tuple[str, str, str], tuple[list[float], list[float]]] = {}
     for r in records:
-        y, p = val.setdefault((r["model"], r["input"], r["isoform"]), ([], []))
+        y, p = val.setdefault((r["model"], r["input"], _target_of(r)), ([], []))
         y.append(float(r["y_true"]))
         p.append(float(r["y_pred"]))
 

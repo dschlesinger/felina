@@ -10,8 +10,8 @@ from pathlib import Path
 import polars as pl
 from polars.testing import assert_frame_equal
 
+from data_tools.datasets import challenge
 from data_tools.prepare_ensemble import (
-    SCORED_TARGETS,
     make_oof_folds,
     prepare_ensemble_data,
 )
@@ -213,7 +213,7 @@ def run(config: dict) -> None:
             output_dir=output_dir / configuration_id / "validation",
             cache_dir=output_dir / "features",
             seeds=config["seeds"],
-            targets=SCORED_TARGETS,
+            targets=list(challenge().targets),
         )
         for seed, predictions in validation_by_seed.items():
             seed_dir = model_dir / "validation" / f"seed-{seed}"

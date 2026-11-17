@@ -62,7 +62,7 @@ def test_heads_are_split_by_source(data_dir):
     assert aspirin["CYP3A4-TDI"] == 4.0
 
 
-def test_isoform_filter_restricts_heads(data_dir):
+def test_target_filter_restricts_heads(data_dir):
     _, heads, _, _ = _merge(data_dir, ["bindingdb:CYP2D6"])
     assert "CYP2D6-BindingDB" in heads and "CYP1A2-BindingDB" not in heads
 

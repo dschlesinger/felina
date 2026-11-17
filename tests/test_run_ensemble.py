@@ -7,8 +7,11 @@ import pytest
 from polars.testing import assert_frame_equal
 
 import models.run_ensemble as runner
-from data_tools.prepare_ensemble import SCORED_TARGETS, prepare_ensemble_data
+from data_tools.datasets import challenge
+from data_tools.prepare_ensemble import prepare_ensemble_data
 from models.stack import predict_stack
+
+SCORED_TARGETS = list(challenge().targets)
 
 
 @pytest.fixture

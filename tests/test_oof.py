@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
+from data_tools.datasets import challenge
 import models.oof as oof
 from models.oof import (
     _file_sha256,
@@ -80,7 +81,7 @@ def test_oof_checkpoint_resume(tmp_path, monkeypatch, loader_tables, change):
     )
     first, first_truth = oof.run_oof(**kwargs)
     first_calls = len(calls)
-    assert first_calls == folds["fold"].n_unique() * len(oof._SCORED_DEFAULT)
+    assert first_calls == folds["fold"].n_unique() * len(challenge().targets)
     completion_path = tmp_path / "run" / "fold-0" / "complete.json"
     first_run_id = json.loads(completion_path.read_text())["run_id"]
 
