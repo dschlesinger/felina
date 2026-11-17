@@ -10,19 +10,23 @@ import pytest
 
 from data_tools.dataset_compare import _cluster_coverage, _scaffolds, compare
 
+# Aliphatics, varied enough that Morgan has bits to work with. A pure homologous series would not be: every
+# radius-2 environment in CCCCCCCCCO is also in CCCCCCCCCCCO, so the two have identical fingerprints and
+# every bit is constant across the set. `test_degenerate_input_reports_nothing_rather_than_crashing`
+# covers that case on purpose.
 _CHAINS = [
     "CCCCCCCCCO",
-    "CCCCCCCCCCO",
-    "CCCCCCCCCCCO",
-    "CCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCCCCCCO",
-    "CCCCCCCCCCCCCCCCCCCCO",
+    "CCCCCCCC(C)O",
+    "CCCCCC(O)CCC",
+    "OCCCCCCCCCN",
+    "CCCCCCCCC(=O)O",
+    "CCCCCCCCCC(=O)OC",
+    "CC(C)CCCCCCO",
+    "OCC(O)CCCCCCC",
+    "CCCCCCCCS",
+    "CCCCCCCCCBr",
+    "CC(C)(C)CCCCCO",
+    "NCCCCCCCCCC",
 ]
 _AMINES = [
     "CN(C)CCc1ccc2ccccc2c1",
@@ -66,17 +70,50 @@ def test_disjoint_chemotypes_separate_far_above_the_null():
 
     assert result.probe_auc > 0.9
     assert result.auc_gap > 0.2
-    assert "shifted" in result.verdict()
+    assert result.nn_ratio > 1.0  # and they really are far apart, not merely distinguishable
+    assert "strongly shifted" in result.verdict()
 
 
-def test_the_same_molecules_compared_to_themselves_show_no_gap():
+def test_a_separable_but_nearby_set_is_not_called_strongly_shifted():
+    """The reading one axis alone gets wrong.
+
+    A congeneric expansion around molecules already in the left set is distinguishable as a population --
+    the probe finds it easily -- while sitting closer to the left set than the left set sits to itself.
+    Calling that "strongly shifted" would point at exactly the held-out split that overstates difficulty.
+    """
+    # A diverse left set, and a right set of molecules absent from it but analogous to part of it.
+    result = compare(
+        _frame(_AMINES[:6] + _CHAINS), _frame(_AMINES[6:]), left_name="train", right_name="expansion"
+    )
+
+    assert result.shared_keys == 0  # genuinely held out, not merely contained
+    assert result.auc_gap > 0.2  # and genuinely separable
+    assert result.nn_ratio <= 1.0
+    assert "analog-expansion" in result.verdict()
+    assert "strongly shifted" not in result.verdict()
+
+
+def test_the_same_molecules_compared_to_themselves_are_called_identical():
+    """Every chemistry reading must say "the same", and the verdict must lead with the containment."""
     result = compare(_frame(_CHAINS + _AMINES), _frame(_CHAINS + _AMINES))
 
-    assert result.auc_gap == pytest.approx(0.0, abs=0.25)
     assert result.shared_keys == result.left_keys == result.right_keys
     assert result.nn_similarity_median == pytest.approx(1.0, abs=1e-6)
     assert result.scaffold_coverage == pytest.approx(1.0)
     assert result.cluster_coverage == pytest.approx(1.0)
+    assert "not an independent set" in result.verdict()
+
+
+def test_duplicated_molecules_across_sides_are_called_out_not_read_as_agreement():
+    """The probe is taught to invert when a held-out molecule's twin sits in the training fold.
+
+    Unfolded that lands near AUC 0, which would read as the two sets matching -- the opposite of what a
+    perfectly inverted probe means. Folded it reads as separable, and a note names the cause.
+    """
+    result = compare(_frame(_CHAINS + _AMINES), _frame(_CHAINS + _AMINES))
+
+    assert result.probe_auc >= 0.5
+    assert any("below chance" in note for note in result.notes)
 
 
 def test_overlap_counts_salt_and_stereo_variants_as_the_same_skeleton():
@@ -107,11 +144,17 @@ def test_feature_drivers_name_the_axis_the_sets_differ_on():
     result = compare(_frame(_CHAINS), _frame(_AMINES), top_features=10)
 
     names = {s.name for s in result.feature_drivers}
-    assert any("Aromatic" in n or "Ring" in n for n in names), names
-    # The amine set is the right-hand one, so its aromatic features must read positive.
-    for shift in result.feature_drivers:
-        if "NumAromaticRings" == shift.name:
-            assert shift.d > 0
+    assert {"iso_aromatic_frac", "FractionCSP3"} & names, names
+    by_name = {s.name: s for s in result.feature_drivers}
+    # The amine set is the right-hand one: more aromatic, less saturated. Both directions must agree.
+    assert by_name["iso_aromatic_frac"].d > 0
+    assert by_name["FractionCSP3"].d < 0
+    # A cleanly separating feature legitimately earns a large d when within-group spread is small, so the
+    # bound here only has to catch the pathology: a near-constant descriptor divided by its rounding error,
+    # which reached 7e15 and outranked every real difference before the scale guard.
+    assert all(np.isfinite(s.d) and abs(s.d) < 1e6 for s in result.feature_drivers), [
+        (s.name, s.d) for s in result.feature_drivers
+    ]
 
 
 def test_descriptor_probe_reports_an_auc_and_its_coefficients():
@@ -129,7 +172,9 @@ def test_label_shift_is_detected_when_the_chemistry_matches():
 
     result = compare(left, right, targets=["CYP3A4_pIC50_direct_inhibition"])
 
-    assert result.auc_gap == pytest.approx(0.0, abs=0.3)  # chemically identical
+    # Chemically the same set; only the labels moved, which no fingerprint reading could see.
+    assert result.shared_keys == result.left_keys
+    assert result.nn_similarity_median == pytest.approx(1.0, abs=1e-6)
     shift = result.label_shifts[0]
     assert shift.left_mean == pytest.approx(4.55, abs=0.1)
     assert shift.right_mean == pytest.approx(7.55, abs=0.1)
@@ -153,6 +198,24 @@ def test_a_target_missing_from_one_side_is_skipped_not_fabricated():
         targets=["CYP3A4_pIC50_direct_inhibition"],
     )
     assert result.label_shifts == ()
+
+
+def test_small_sets_report_no_probe_rather_than_a_misleading_one():
+    """Three molecules cannot be cross-validated. The answer is 'unmeasured', not 0.5."""
+    result = compare(_frame(_AMINES[:3]), _frame(_CHAINS[:3]))
+
+    assert np.isnan(result.probe_auc)
+    assert any("a side" in note for note in result.notes)
+    assert "not measurable" in result.verdict()
+
+
+def test_degenerate_input_reports_nothing_rather_than_crashing():
+    """A homologous series has one fingerprint repeated, so there is no bit to separate anything on."""
+    series = [f"{'C' * n}O" for n in range(9, 21)]
+    result = compare(_frame(series), _frame(series))
+
+    assert np.isnan(result.mmd)
+    assert any("constant" in note for note in result.notes)
 
 
 def test_cluster_coverage_is_zero_for_chemically_disjoint_sets():

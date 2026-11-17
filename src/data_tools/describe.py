@@ -158,14 +158,20 @@ def usable_columns(X: np.ndarray) -> np.ndarray:
 
     A descriptor that is NaN or Inf for even one molecule (RDKit's Ipc overflows on large rings) would
     otherwise poison a standardization or a probe fit for the whole table.
+
+    "Not constant" is decided on the range, not the standard deviation. A near-constant column's variance is
+    computed through a subtraction that cancels, and the result depends on how many columns are in the array
+    at the time -- so a column could pass a `std > 0` test here and come back with a std of exactly zero once
+    sliced out, which then divides by zero downstream. Comparing the maximum with the minimum involves no
+    arithmetic and cannot disagree with itself.
     """
     if X.size == 0:
         return np.zeros(X.shape[1], dtype=bool)
     finite = np.isfinite(X).all(axis=0)
-    varying = np.zeros(X.shape[1], dtype=bool)
-    if X.shape[0] > 1:
-        with np.errstate(invalid="ignore"):
-            varying = np.nanstd(X, axis=0) > 0
+    if X.shape[0] < 2:
+        return np.zeros(X.shape[1], dtype=bool)
+    with np.errstate(invalid="ignore"):
+        varying = np.nanmax(X, axis=0) > np.nanmin(X, axis=0)
     return finite & varying
 
 
@@ -199,9 +205,15 @@ def feature_shifts(
         a, b = group[:, j], rest[:, j]
         # Pooled standard deviation; a zero means the two sides are each constant at the same value.
         pooled = np.sqrt(((len(a) - 1) * a.var(ddof=1) + (len(b) - 1) * b.var(ddof=1)) / (len(a) + len(b) - 2))
-        if not np.isfinite(pooled) or pooled == 0:
+        # Judged against the column's own scale, not against zero. Several RDKit VSA descriptors are
+        # constant to within rounding error, and dividing a rounding-error difference by a rounding-error
+        # spread yields effect sizes in the quadrillions that then outrank every real difference.
+        scale = max(abs(float(a.mean())), abs(float(b.mean())), 1.0)
+        if not np.isfinite(pooled) or pooled <= 1e-9 * scale:
             continue
         d = float((a.mean() - b.mean()) / pooled)
+        if not np.isfinite(d):
+            continue
         if abs(d) < min_abs_d:
             continue
         try:

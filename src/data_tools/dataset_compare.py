@@ -43,6 +43,7 @@ import polars as pl
 from data_tools.describe import FeatureShift, feature_shifts, named_features, target_stats, usable_columns
 
 _MAX_PROBE = 3000  # rows sampled per side for the probe, MMD and distance work
+_MIN_PROBE = 5  # the probe stratifies into five folds, so fewer than five a side is no reading at all
 _DEFAULT_CUTOFF = 0.4
 
 
@@ -113,11 +114,30 @@ class Comparison:
         return 100.0 * self.shared_keys / self.right_keys if self.right_keys else 0.0
 
     def verdict(self) -> str:
-        """One line naming what the numbers add up to."""
+        """One line naming what the numbers add up to, read across both axes rather than one.
+
+        Separability and distance are independent, and the combination that catches people out is high
+        separability with *low* distance: the two sets are distinguishable populations, yet every right-hand
+        molecule has a close left-hand neighbour. That is the analog-expansion regime, and it is why
+        scaffold- or cluster-held-out validation reports a harder problem than the one actually being
+        scored. Reading the probe alone would call that case "strongly shifted" and send you to exactly the
+        split that overstates the difficulty.
+        """
         if self.shared_keys and self.shared_pct_right > 50:
             return f"{self.right_name} is largely contained in {self.left_name}: not an independent set"
+        if not np.isfinite(self.auc_gap):
+            # Saying "indistinguishable" here would turn "we could not measure it" into a finding.
+            return "not measurable: too few molecules, or no feature varies; see the notes"
+
+        close = np.isfinite(self.nn_ratio) and self.nn_ratio <= 1.0
         if self.auc_gap < 0.05:
             return f"indistinguishable: the probe does no better on the real pair than on {self.left_name} against itself"
+        if close:
+            return (
+                f"separable but close: {self.right_name} is a distinguishable population, yet it sits no "
+                f"farther from {self.left_name} than {self.left_name} sits from itself -- an analog-expansion "
+                "regime, where scaffold- or cluster-held-out validation overstates the difficulty"
+            )
         if self.auc_gap < 0.20:
             return "mildly shifted: a model trained on the left should mostly transfer"
         return "strongly shifted: the right set is a different chemical population, treat left-side validation as optimistic"
@@ -227,7 +247,15 @@ def _probe_drivers(
         return float("nan"), ()
     X = X[:, keep]
     kept_names = [n for n, k in zip(names, keep) if k]
-    X = (X - X.mean(axis=0)) / X.std(axis=0)
+
+    # Re-check the spread on the sliced matrix and divide by that same vector. Deciding "varies" from one
+    # computation and dividing by another invites a zero denominator on a near-constant column.
+    spread = X.std(axis=0)
+    varies = spread > 0
+    if not varies.any():
+        return float("nan"), ()
+    X = (X[:, varies] - X[:, varies].mean(axis=0)) / spread[varies]
+    kept_names = [n for n, v in zip(kept_names, varies) if v]
     y = np.r_[np.zeros(len(X_left)), np.ones(len(X_right))]
 
     smallest = int(np.bincount(y.astype(int)).min())
@@ -293,20 +321,47 @@ def compare(
     sample_left, sample_right = fp_left[rows_left], fp_right[rows_right]
 
     # Headline probe, and the null it has to beat: a random split of the left set against itself.
-    probe_auc = two_sample_auc(sample_left, sample_right, seed)
+    def probe(a: np.ndarray, b: np.ndarray, what: str) -> float:
+        """Folded `two_sample_auc`, or NaN and a note when there is too little to cross-validate.
+
+        Two guards, both about not turning an artefact into a finding.
+
+        It stratifies into five folds, so fewer than five molecules on a side is not a low reading, it is
+        no reading at all -- and reporting it as 0.5 would claim the two sets match.
+
+        The result is folded about 0.5 because which side the classifier calls positive is arbitrary: 0.1 is
+        as separable as 0.9. Unfolded, a set compared against one that shares its molecules scores near
+        *zero* -- each held-out molecule's duplicate sits in the training fold under the opposite label, so
+        the probe is taught to invert -- and that would read as "indistinguishable" exactly when the two
+        sets are the same data.
+        """
+        if min(len(a), len(b)) < _MIN_PROBE:
+            notes.append(f"{what}: needs {_MIN_PROBE} molecules a side, had {min(len(a), len(b))}")
+            return float("nan")
+        raw = two_sample_auc(a, b, seed)
+        if raw < 0.35:
+            notes.append(
+                f"{what}: raw AUC {raw:.2f} is below chance, which means molecules appear on both sides; "
+                "folded to its distance from 0.5"
+            )
+        return 0.5 + abs(raw - 0.5)
+
+    probe_auc = probe(sample_left, sample_right, "probe AUC")
     half = rng.permutation(len(sample_left))
     cut = len(half) // 2
-    probe_null = (
-        two_sample_auc(sample_left[half[:cut]], sample_left[half[cut:]], seed)
-        if cut >= 5
-        else float("nan")
-    )
+    probe_null = probe(sample_left[half[:cut]], sample_left[half[cut:]], "null AUC")
 
     shift, d_right = fingerprint_shift(sample_left, sample_right)
     nn_similarity = float(np.median(1.0 - d_right)) if len(d_right) else float("nan")
 
+    # `standardize` drops every column that is constant across the left set. A congeneric enough left set
+    # leaves nothing behind, and the distance machinery cannot run on a zero-width matrix.
     Z_left, Z_right = standardize(sample_left, sample_right)
-    mmd, mmd_p = mmd_rbf(Z_left, Z_right, seed)
+    if Z_left.shape[1] == 0:
+        notes.append(f"every fingerprint bit is constant across {left_name}, so MMD could not be computed")
+        mmd, mmd_p = float("nan"), float("nan")
+    else:
+        mmd, mmd_p = mmd_rbf(Z_left, Z_right, seed)
 
     # Named features, on exactly the rows the probe and distance readings used, so every number in the
     # report describes the same molecules.

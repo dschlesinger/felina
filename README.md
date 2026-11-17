@@ -22,6 +22,8 @@ data fetch NAME --redownload   # fetch the raw files again instead of reusing wh
 data remove NAME           # delete a dataset's raw and derived files
 data alias NAME ALIAS      # short alias, stored in data-alias.csv
 download-data              # same as `data fetch all`
+data explore NAME          # cluster a dataset and draw what each cluster contains
+data compare LEFT RIGHT    # how far one dataset sits from another, and what the gap is made of
 ```
 
 Fetching reuses raw files that are already on disk; `--redownload` goes back to the source. The derive step runs
@@ -36,6 +38,50 @@ directory holding that code next to the spec (`pubchem_aid1851/`, `p450_family/`
 related datasets. Adding a dataset means adding a module there and changing nothing else —
 `data_tools.datasets.registry()` discovers it, `data list` shows it, and `--datasets` accepts it. See
 `src/data_tools/dataset_spec.py` for the fields.
+
+### Looking at the data
+
+`data explore` and `data compare` both take a registered dataset name, an alias, or a path to any CSV with a
+SMILES column, so they work on external tables as readily as on the project's own.
+
+```bash
+data explore test                      # clusters, drawn to reports/test_clusters.png
+data explore train --cutoff 0.55 --min-size 10 --max-clusters 16
+data compare train test                # the question behind most of this repo
+data compare train chembl --out reports/train_vs_chembl.txt
+```
+
+`data explore` clusters with Butina on Morgan fingerprints — the same unit a cluster-held-out CV fold moves
+around — and draws one panel per cluster: the medoid molecule, the member count and its share of the dataset,
+each target's mean and spread, and the named features separating the cluster from the rest with an effect
+size. On the blind set it picks out the imidazole, thiophene, thiazole and methylenedioxyphenyl groups
+unprompted, which is the heme-binding and mechanism-based-inactivation chemistry the motif table encodes.
+
+The default cutoff of 0.4 matches the splitter's, and is tight: the blind set breaks into 352 clusters, only
+40 of them with five or more members. `--cutoff 0.55` gives 130 clusters with a median size of 5, which is
+much closer to the congeneric-series structure the set was built with.
+
+`data compare` reports six readings, because any one alone misleads:
+
+```text
+overlap            shared InChIKey connectivity blocks — leakage against a blind set, duplication otherwise
+probe AUC          cross-validated AUROC of a classifier separating the two sets on fingerprints
+null AUC           the same probe on the left set split against itself at random
+distance           median nearest-neighbour Tanimoto, nn_ratio, frac_out, and an MMD permutation test
+drivers            the named features whose distributions move most, by effect size
+labels             per shared target, each side's mean and spread and a KS test
+```
+
+The null is the one the headline AUC is unreadable without. A probe handed a few hundred molecules in two
+thousand dimensions separates random halves of a *single* dataset well above chance, so an AUC of 0.72
+against a null of 0.70 means nothing; `gap` is the number to read.
+
+Separability and distance are independent, and the combination worth recognising is high separability with
+low distance. On `train` against the blind `test` the probe scores 0.800 against a null of 0.504 — clearly
+distinguishable populations — while the median nearest-neighbour Tanimoto is 0.569 and `nn_ratio` is 0.742,
+meaning the blind molecules sit *closer* to train than train sits to itself. That is an analog expansion, not
+novel chemistry, and holding out scaffolds or clusters to validate against it answers a harder question than
+the one being scored. The verdict line reads both axes rather than the probe alone for that reason.
 
 ### The scored dataset
 
