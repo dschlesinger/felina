@@ -166,7 +166,18 @@ plot-results         # redraw the evaluate-models plots from a saved --predictio
 foundation-model     # list/alias trained chemprop, unimol and Atom-JEPA runs and generate their feature caches, plus the pretrained chemeleon, unimol, atom_jepa and atom_jepa_bio (--list, --paths, --generate-cache)
 motif-report         # generate reports/pharmacophore_features.md from the pharmacophore motif table
 list-runs            # previous train-model / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
+download-leaderboard # save snapshots of the challenge Space's leaderboards (--list, --all, --select final)
+leaderboard-lit      # fetch every method report / repo linked from the saved leaderboards (--fetch, --open-code, --list)
 ```
+
+`leaderboard-lit` reads the latest snapshot of each leaderboard from `download-leaderboard` (or `--fetch`es new ones)
+and downloads every `Model Report Link` into `results/leaderboard_lit/<space>/<user>/<target>/`. Git repositories
+(GitHub, gists, Hugging Face, tangled, GitLab, Codeberg, Bitbucket, and any other URL that answers `git ls-remote`)
+are shallow-cloned at the linked commit or branch, with files over `--max-mb` (default 5) left out. Google Docs are
+exported as text, Drive files downloaded, and every other page saved as `page.html` plus parsed `page.txt` and
+`links.txt`. `index.csv` records each link's status; `FAILURES.md` lists the ones that failed (HTTP 403/404, missing
+repos, timeouts) or came back nearly empty (login walls, JavaScript-only pages). Reruns retry only what failed. The
+clones of all ~150 links take several GB.
 
 `train-model` (one run per seed/config of a sweep) and `evaluate-models` give every run its own folder,
 `results/runs/<id>__<train|eval>__<flags>/`, and write everything the run produces into it. The id counts up, and the
