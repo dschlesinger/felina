@@ -274,11 +274,33 @@ different feature vectors.
 | `none` | The SMILES reaches the featurizer exactly as written. |
 | `normal` (default) | Largest fragment by string length, then RDKit canonical SMILES. What the project has always done, so it is the behaviour every recorded result was produced under. |
 | `advanced` | `rdMolStandardize` Cleanup → FragmentParent → Uncharger, then canonical SMILES: normalizes functional groups, takes the parent by molecular weight, neutralizes charges. |
+| `tautomer` | `advanced` plus `TautomerEnumerator.Canonicalize`, so a tautomer family collapses to one representative. Slowest. |
 
 The modes differ on salts and charge states. `CCO.[Na+]` standardizes to
 `[Na+]` under `normal`, because the longest *string* component wins, and to
 `CCO` under `advanced`, which picks by weight. `CC(=O)[O-]` keeps its charge
-under `normal` and becomes `CC(=O)O` under `advanced`.
+under `normal` and becomes `CC(=O)O` under `advanced`. `Oc1ccccn1` and
+`O=c1cccc[nH]1` stay apart under `advanced` and both become `O=c1cccc[nH]1`
+under `tautomer`.
+
+`tautomer` sets `SetRemoveSp3Stereo(False)` and `SetRemoveBondStereo(False)`,
+against RDKit's defaults, which otherwise strip stereo wherever a transform
+*could* reach it — enough to flatten methotrexate's alpha carbon and
+diethylstilbestrol's double bond. Four molecules in train+test still lose
+stereo because a transform genuinely moves that centre: two mifepristone-type
+steroids whose enone tautomerizes across the ring fusion, a rapamycin-type
+macrolide whose ketone enolizes, and vitamin K, which aromatizes to the
+hydroquinone. RDKit's scoring function likes aromatic rings, and that is where
+its canonical tautomer is least chemically convincing.
+
+Measured on train+test (5,655 molecules): `tautomer` takes about 40 s against
+7 s for `advanced`, rewrites 363 of them relative to `advanced`, and merges
+**no** two molecules in the set — every one already had a distinct canonical
+tautomer. On a 4,000-row sample of the PubChem AID1851 auxiliary data it raised
+exact string matches to the challenge from 21 to 22. So its value here is
+representational consistency, not deduplication: the identity keys already run
+through InChI, whose mobile-H layer merges most tautomers before the join. Treat
+it as something to A/B, not an obvious win.
 
 The feature cache is content-addressed by the standardized SMILES, so switching
 mode recomputes rather than reusing: a mode that rewrites a molecule asks for a

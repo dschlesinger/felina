@@ -24,8 +24,8 @@ def test_default_mode_is_normal():
     assert standardization.get_mode() == "normal"
 
 
-def test_modes_are_the_three_documented_ones():
-    assert standardization.MODES == ("none", "normal", "advanced")
+def test_modes_are_the_four_documented_ones():
+    assert standardization.MODES == ("none", "normal", "advanced", "tautomer")
 
 
 def test_none_passes_smiles_through_untouched():
@@ -56,9 +56,48 @@ def test_advanced_neutralizes_charges():
     assert standardization.standardize_one("CC(=O)[O-]", "normal") == "CC(=O)[O-]"
 
 
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ("Oc1ccccn1", "O=c1cccc[nH]1"),  # 2-hydroxypyridine / 2-pyridone
+        ("CC(=O)CC(C)=O", "CC(O)=CC(C)=O"),  # keto / enol
+        ("CC(=O)N", "CC(O)=N"),  # amide / imidic acid
+    ],
+)
+def test_tautomer_collapses_a_tautomer_pair(pair):
+    """Both spellings land on one representative, which `advanced` leaves apart."""
+    left, right = (standardization.standardize_one(s, "tautomer") for s in pair)
+    assert left == right
+    assert standardization.standardize_one(pair[0], "advanced") != standardization.standardize_one(
+        pair[1], "advanced"
+    )
+
+
+def test_tautomer_keeps_sp3_stereo():
+    """RDKit's enumerator strips stereo by default; methotrexate must keep its alpha carbon.
+
+    Stereoisomers carry different CYP labels here, so the tautomer mode is not
+    allowed to flatten them on its way past.
+    """
+    methotrexate = "CN(Cc1cnc2nc(N)nc(N)c2n1)c1ccc(C(=O)N[C@@H](CCC(=O)O)C(=O)O)cc1"
+    assert "@" in standardization.standardize_one(methotrexate, "tautomer")
+
+
+def test_tautomer_keeps_double_bond_stereo():
+    """Diethylstilbestrol keeps its double-bond geometry."""
+    des = "CC/C(=C(/CC)c1ccc(O)cc1)c1ccc(O)cc1"
+    out = standardization.standardize_one(des, "tautomer")
+    assert "/" in out or "\\" in out
+
+
+def test_tautomer_still_does_everything_advanced_does():
+    """It is `advanced` plus a step, so the salt and the charge are handled too."""
+    assert standardization.standardize_one("CC(=O)[O-].[Na+]", "tautomer") == "CC(=O)O"
+
+
 def test_unparsable_smiles_is_returned_unchanged():
     """A molecule RDKit rejects reaches the featurizer as it would under 'none', rather than vanishing."""
-    for mode in ("normal", "advanced"):
+    for mode in ("normal", "advanced", "tautomer"):
         assert standardization.standardize_one("not-a-molecule", mode) == "not-a-molecule"
 
 

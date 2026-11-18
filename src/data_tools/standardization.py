@@ -20,6 +20,10 @@ Modes (`--standardization`):
             canonical SMILES. Normalizes functional groups, strips counter-ions
             by molecular weight rather than string length, and neutralizes
             charges. Competitor reports (Preservea, OstarkovSN) used this chain.
+  tautomer  `advanced` plus TautomerEnumerator.Canonicalize, so every member of
+            a tautomer family collapses to one representative form. The slowest
+            mode. Competitors who normalized tautomers: elliotsmithlover3000,
+            HBI (for blind exclusion), Shorku (lowest-energy form).
 
 Adding a mode is one entry in `_MODES`; nothing else in the project needs to
 know the list.
@@ -64,8 +68,8 @@ def _normal(smiles: str) -> Optional[str]:
     return Chem.MolToSmiles(mol)
 
 
-def _advanced(smiles: str) -> Optional[str]:
-    """Cleanup -> FragmentParent -> Uncharger, then canonical SMILES.
+def _parent_mol(smiles: str):
+    """Cleanup -> FragmentParent -> Uncharger, as a mol. None when RDKit cannot do it.
 
     Cleanup normalizes functional-group representations (nitro, azide, ...),
     FragmentParent takes the parent by molecular weight so a heavy counter-ion
@@ -88,13 +92,69 @@ def _advanced(smiles: str) -> Optional[str]:
         return None
     if mol is None or mol.GetNumAtoms() == 0:
         return None
-    return Chem.MolToSmiles(mol)
+    return mol
 
+
+def _advanced(smiles: str) -> Optional[str]:
+    """Cleanup -> FragmentParent -> Uncharger, then canonical SMILES."""
+    from rdkit import Chem  # type: ignore[import]
+
+    mol = _parent_mol(smiles)
+    return None if mol is None else Chem.MolToSmiles(mol)
+
+
+def _tautomer(smiles: str) -> Optional[str]:
+    """`advanced`, then RDKit's canonical tautomer.
+
+    A ketone drawn as its enol, a 2-hydroxypyridine drawn as the pyridinone,
+    an amide drawn as the imidic acid: the same compound, two graphs, two
+    fingerprints. TautomerEnumerator walks the tautomer transforms and returns
+    whichever form a fixed scoring function ranks highest, so every member of a
+    tautomer family lands on one representative.
+
+    The enumerator is the slow step and the one that can blow up: a molecule
+    with many mobile hydrogens has a large tautomer space, so the enumeration is
+    bounded and a molecule that exceeds the bound keeps its `advanced` form
+    rather than costing the run. `Canonicalize` picks the highest-scoring form
+    it reached, so a truncated enumeration is a worse representative, not a
+    wrong molecule.
+
+    Stereo is kept, against RDKit's defaults. The enumerator otherwise strips
+    sp3 and double-bond stereo wherever a tautomer transform *could* touch it,
+    which silently flattens molecules the transforms never actually move:
+    methotrexate loses its alpha-carbon and diethylstilbestrol its double-bond
+    geometry. Stereoisomers are different molecules with different CYP labels
+    here (see `data_tools.standardize.stereo_key`), so a tautomer mode is not
+    the place to discard them.
+    """
+    from rdkit import Chem  # type: ignore[import]
+    from rdkit.Chem.MolStandardize import rdMolStandardize  # type: ignore[import]
+
+    mol = _parent_mol(smiles)
+    if mol is None:
+        return None
+    enumerator = rdMolStandardize.TautomerEnumerator()
+    enumerator.SetMaxTautomers(_MAX_TAUTOMERS)
+    enumerator.SetMaxTransforms(_MAX_TAUTOMER_TRANSFORMS)
+    enumerator.SetRemoveSp3Stereo(False)
+    enumerator.SetRemoveBondStereo(False)
+    try:
+        canonical = enumerator.Canonicalize(mol)
+    except Exception:  # pylint: disable=broad-except  # enumeration failed; the parent form stands
+        return Chem.MolToSmiles(mol)
+    return Chem.MolToSmiles(canonical if canonical is not None else mol)
+
+
+# RDKit's own defaults (1000 each). Named here because they are the knob that trades
+# runtime against how often a large tautomer family is truncated.
+_MAX_TAUTOMERS = 1000
+_MAX_TAUTOMER_TRANSFORMS = 1000
 
 _MODES: dict[str, Callable[[str], Optional[str]]] = {
     "none": _none,
     "normal": _normal,
     "advanced": _advanced,
+    "tautomer": _tautomer,
 }
 
 MODES = tuple(_MODES)
@@ -176,7 +236,8 @@ def add_argument(parser) -> None:
             f"How SMILES are standardized before featurization (default: {DEFAULT_MODE}). "
             "'none' passes them through; 'normal' takes the largest fragment and canonicalizes, "
             "which is what every recorded result was produced under; 'advanced' runs RDKit's "
-            "Cleanup + FragmentParent + Uncharger. Features are cached per SMILES string, so "
+            "Cleanup + FragmentParent + Uncharger; 'tautomer' adds canonical-tautomer selection "
+            "on top of 'advanced' and is the slowest. Features are cached per SMILES string, so "
             "switching modes recomputes rather than reuses."
         ),
     )
