@@ -10,19 +10,22 @@ from models.stack import (
     predict_stack
 )
 from polars.testing import assert_frame_equal
+from data_tools.datasets import challenge
 from models.validation import deduplication_filter
 
+# Several label columns for the cases that need more than one target. The challenge scores a
+# single target, but a stacker is handed whichever columns it is asked to fit, so these are the
+# scored target plus the auxiliary heads trained alongside it.
+MULTI_TARGETS = ["pEC50", "Emax_log2FC", "Emax_vs_pos_ctrl"]
 
-def test_recovers_expected_weights(stack_tables) -> None:
+
+def test_recovers_expected_weights(stack_tables, stack_blends) -> None:
     predictions, truth = stack_tables
 
     results = fit_nnls_stack(predictions, truth)
 
     expected = {
-        "CYP1A2_pIC50_direct_inhibition": [0.2, 0.8, 0.0],
-        "CYP2C9_pIC50_direct_inhibition": [0.4, 0.6, 0.0],
-        "CYP2D6_pIC50_direct_inhibition": [0.6, 0.4, 0.0],
-        "CYP3A4_pIC50_direct_inhibition": [0.8, 0.2, 0.0],
+        target: [a, b, 0.0] for target, (a, b) in stack_blends.items()
     }
 
     for target, expected_weights in expected.items():
@@ -112,19 +115,12 @@ def test_rejects_extra_prediction(stack_tables) -> None:
 
 
 # Reported metrics
-def test_per_model_rmse(stack_tables) -> None:
+def test_per_model_rmse(stack_tables, stack_blends) -> None:
     predictions, truth = stack_tables
 
     results = fit_nnls_stack(predictions, truth)
 
-    expected_weights = {
-        "CYP1A2_pIC50_direct_inhibition": (0.2, 0.8),
-        "CYP2C9_pIC50_direct_inhibition": (0.4, 0.6),
-        "CYP2D6_pIC50_direct_inhibition": (0.6, 0.4),
-        "CYP3A4_pIC50_direct_inhibition": (0.8, 0.2),
-    }
-
-    for target, (a, b) in expected_weights.items():
+    for target, (a, b) in stack_blends.items():
         expected_rmse = {
             "model_a": (((1 - a) ** 2 + b ** 2) / 4) ** 0.5,
             "model_b": ((a ** 2 + (1 - b) ** 2) / 4) ** 0.5,
@@ -188,13 +184,16 @@ def test_rejects_null_values(stack_tables, table_name: str, column: str) -> None
 
 # Fold integrity
 @pytest.mark.parametrize("table_name", ["predictions", "truth"])
-def test_rejects_multiple_folds_per_molecule(stack_tables, table_name: str) -> None:
-    predictions, truth = stack_tables
+def test_rejects_multiple_folds_per_molecule(
+    multi_target_stack_data, table_name: str
+) -> None:
+    # Several targets: a molecule can only straddle two folds if it has more than one row.
+    predictions, truth = multi_target_stack_data
 
     changed_fold = (
         pl.when(
-            (pl.col("inchikey_full") == "SYNTHETIC_A")
-            & (pl.col("target") == "CYP1A2_pIC50_direct_inhibition")
+            (pl.col("inchikey_full") == "molecule_0_0")
+            & (pl.col("target") == MULTI_TARGETS[0])
         )
         .then(pl.lit(1))
         .otherwise(pl.col("fold"))
@@ -209,7 +208,7 @@ def test_rejects_multiple_folds_per_molecule(stack_tables, table_name: str) -> N
         message = "Truth molecules assigned to multiple folds"
 
     with pytest.raises(ValueError, match=message):
-        fit_nnls_stack(predictions, truth)
+        fit_nnls_stack(predictions, truth, targets=MULTI_TARGETS)
 
 @pytest.fixture
 def seed_averaging_data(stack_tables):
@@ -325,14 +324,8 @@ def test_seed_averaging_rejects_invalid_prediction_tables(
         with pytest.raises(ValueError, match="Each prediction table must contain exactly one model_id."):
             _seed_averaging(predictions_by_seed, truth, model_id="model_a_averaged")
 
-@pytest.fixture
-def ridge_stack_data():
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+def _linear_stack_data(targets):
+    """Build tables whose truth is 5 + 2a - b, for the given target columns."""
     prediction_rows = []
     truth_rows = []
 
@@ -362,6 +355,18 @@ def ridge_stack_data():
                     })
 
     return pl.DataFrame(prediction_rows), pl.DataFrame(truth_rows)
+
+
+@pytest.fixture
+def ridge_stack_data():
+    return _linear_stack_data(list(challenge().targets))
+
+
+@pytest.fixture
+def multi_target_stack_data():
+    """The same tables over several targets, for what one target cannot show."""
+    return _linear_stack_data(MULTI_TARGETS)
+
 
 def test_ridge_stack_weights_intercept_and_metrics(ridge_stack_data):
     predictions, truth = ridge_stack_data
@@ -447,12 +452,7 @@ def test_stack_uses_supplied_folds(
         fraction=1.0, shuffle=True, seed=42
     )
 
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     fit_calls = []
 
@@ -495,7 +495,7 @@ def test_stack_uses_supplied_folds(
        
     monkeypatch.setattr(f"models.stack.{estimator_name}", FakeEstimator)
     fit_stack(shuffled_predictions, shuffled_truth)
-    assert len(fit_calls) == 4
+    assert len(fit_calls) == len(targets)
 
 @pytest.mark.parametrize(
     "fit_stack",
@@ -591,8 +591,8 @@ def test_elastic_stack_drops_zero_weight_model(ridge_stack_data):
     [fit_nnls_stack, fit_ridgecv_stack, fit_elasticnetcv_stack],
     ids=["nnls", "ridge", "elasticnet"],
 )
-def test_stack_accepts_different_models_per_target(ridge_stack_data, stacker):
-    predictions, truth = ridge_stack_data
+def test_stack_accepts_different_models_per_target(multi_target_stack_data, stacker):
+    predictions, truth = multi_target_stack_data
     target = sorted(truth["target"].unique().to_list())[0]
 
     predictions = predictions.filter(
@@ -602,7 +602,7 @@ def test_stack_accepts_different_models_per_target(ridge_stack_data, stacker):
         )
     )
 
-    results = stacker(predictions, truth)
+    results = stacker(predictions, truth, targets=MULTI_TARGETS)
 
     for name, result in results.items():
         expected_models = (
@@ -623,14 +623,15 @@ def test_validate_rejects_partial_target_coverage(ridge_stack_data):
         fit_nnls_stack(incomplete, truth)
 
 
-def test_validate_rejects_target_without_models(ridge_stack_data):
-    predictions, truth = ridge_stack_data
+def test_validate_rejects_target_without_models(multi_target_stack_data):
+    # Several targets: dropping the only one would leave an empty table, a different complaint.
+    predictions, truth = multi_target_stack_data
     target = truth["target"][0]
 
     predictions = predictions.filter(pl.col("target") != target)
 
     with pytest.raises(ValueError, match="Predictions missing target"):
-        fit_nnls_stack(predictions, truth)
+        fit_nnls_stack(predictions, truth, targets=MULTI_TARGETS)
 
 
 @pytest.mark.parametrize(
@@ -638,8 +639,8 @@ def test_validate_rejects_target_without_models(ridge_stack_data):
     [fit_nnls_stack, fit_ridgecv_stack, fit_elasticnetcv_stack],
     ids=["nnls", "ridge", "elasticnet"],
 )
-def test_deduplicated_oof_feeds_stack(ridge_stack_data, stacker):
-    oof_predictions, oof_truth = ridge_stack_data
+def test_deduplicated_oof_feeds_stack(multi_target_stack_data, stacker):
+    oof_predictions, oof_truth = multi_target_stack_data
     targets = sorted(oof_truth["target"].unique().to_list())
     merged_target = targets[0]
 
@@ -677,7 +678,7 @@ def test_deduplicated_oof_feeds_stack(ridge_stack_data, stacker):
         oof_truth,
     )
 
-    results = stacker(clustered_oof, oof_truth)
+    results = stacker(clustered_oof, oof_truth, targets=targets)
 
     assert set(results) == set(targets)
 

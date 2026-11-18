@@ -2,17 +2,15 @@ import numpy as np
 import polars as pl
 import pytest
 
+from data_tools.datasets import challenge
 import models.ensemble as ensemble
 
 
 @pytest.fixture
 def ensemble_tables():
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    # The stack validators accept the scored targets and nothing else, so the
+    # fixture spans exactly those rather than a list of its own.
+    targets = list(challenge().targets)
 
     # Model: (validation error, OOF error).
     # A/B pass both filters and correlate perfectly.
@@ -155,7 +153,9 @@ def test_filtered_stack_requires_both_filters(ensemble_tables):
         "bad_ratio": (True, False, False),
     }
 
-    assert decisions.height == 16
+    targets = set(ensemble_tables["validation_truth"]["target"])
+
+    assert decisions.height == len(expected) * len(targets)
     for row in decisions.iter_rows(named=True):
         assert (
             row["quality_keep"],

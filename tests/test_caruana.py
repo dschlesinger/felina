@@ -2,6 +2,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from data_tools.datasets import challenge
 from models.caruana import fit_caruana_stack, bagging_wrapper
 from models.stack import predict_stack
 import models.caruana as caruana
@@ -9,12 +10,9 @@ import models.caruana as caruana
 
 @pytest.fixture
 def complementary_predictions():
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    # The stack validators accept the scored targets and nothing else, so the
+    # fixture spans exactly those rather than a list of its own.
+    targets = list(challenge().targets)
     truth_rows = []
     prediction_rows = []
 

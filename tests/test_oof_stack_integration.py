@@ -7,6 +7,7 @@ import pytest
 from models.stack import fit_nnls_stack
 import models.oof as oof
 from polars.testing import assert_frame_equal
+from data_tools.datasets import challenge
 
 @pytest.fixture
 def load_oof_fixture(monkeypatch: pytest.MonkeyPatch):
@@ -25,14 +26,14 @@ def load_oof_fixture(monkeypatch: pytest.MonkeyPatch):
         "model_c": [0.0, 0.0, 1.0, 1.0],
     }
 
-    target_truth_values = {
-        "CYP1A2_pIC50_direct_inhibition": [0.2, 0.8, 0.0, 1.0],
-        "CYP2C9_pIC50_direct_inhibition": [0.4, None, 0.0, 1.0],
-        "CYP2D6_pIC50_direct_inhibition": [0.6, 0.4, 0.0, 1.0],
-        "CYP3A4_pIC50_direct_inhibition": [0.8, 0.2, 0.0, 1.0],
-    }
+    targets = list(challenge().targets)
 
-    targets = list(target_truth_values)
+    # Every target's truth is a blend of model_a and model_b. The first one leaves a label out,
+    # so that the unlabelled molecule has to be dropped from its fold rather than predicted.
+    target_truth_values = {
+        target: [0.4, None, 0.0, 1.0] if index == 0 else [0.6, 0.4, 0.0, 1.0]
+        for index, target in enumerate(targets)
+    }
 
     data = pl.DataFrame({
         "inchikey_full": [molecule for molecule, fold in molecules],
@@ -123,15 +124,13 @@ def test_oof_to_stack(tmp_path: Path, load_oof_fixture):
     results = fit_nnls_stack(predictions, actual_truth)
 
     expected_weights = {
-        targets[0]: [0.2, 0.8, 0.0],
-        targets[1]: [0.4, 0.6, 0.0],
-        targets[2]: [0.6, 0.4, 0.0],
-        targets[3]: [0.8, 0.2, 0.0],
+        target: [0.4, 0.6, 0.0] if index == 0 else [0.6, 0.4, 0.0]
+        for index, target in enumerate(targets)
     }
 
-    assert truth.height == 15
-    assert predictions.height == 45  # Three models × 15 labels.
-    assert len(instances) == 24  # Three models × two folds × four targets.
+    assert truth.height == 4 * len(targets) - 1  # One molecule is unlabelled on the first target.
+    assert predictions.height == 3 * truth.height  # Three models × every label.
+    assert len(instances) == 3 * 2 * len(targets)  # Three models × two folds × every target.
     assert set(results) == set(targets)
     for target, expected in expected_weights.items():
         actual = [
@@ -203,7 +202,7 @@ def test_run_oof_invalidates_changed_inputs(
 
     original_predictions, original_truth = oof.run_oof(**run_args)
 
-    assert len(instances) == 8  # Two folds × four targets.
+    assert len(instances) == 2 * len(targets)  # Two folds × every target.
 
     if changed_input == "model_params":
         run_args["model_params"] = {"prediction_key": "model_b"}
@@ -233,7 +232,7 @@ def test_run_oof_invalidates_changed_inputs(
     updated_predictions, updated_truth = oof.run_oof(**run_args)
 
     # The changed run fingerprint must invalidate both saved folds.
-    assert len(instances) == 16
+    assert len(instances) == 4 * len(targets)
 
     prediction_keys = ["model_id", "inchikey_full", "fold", "target"]
     truth_keys = ["inchikey_full", "fold", "target"]
@@ -254,7 +253,7 @@ def test_run_oof_invalidates_changed_inputs(
     # The updated run should now resume without further training.
     resumed_predictions, resumed_truth = oof.run_oof(**run_args)
 
-    assert len(instances) == 16
+    assert len(instances) == 4 * len(targets)
     assert_frame_equal(
         resumed_predictions.sort(prediction_keys),
         updated_predictions.sort(prediction_keys),
@@ -291,7 +290,7 @@ def test_run_oof_recovers_corrupt_fold(tmp_path: Path, load_oof_fixture):
 
     original_predictions, original_truth = oof.run_oof(**run_args)
 
-    assert len(instances) == 8  
+    assert len(instances) == 2 * len(targets)
 
     # Damage only fold 0's saved predictions.
     corrupt_path = tmp_path / "model_a" / "fold-0" / "predictions.csv"
@@ -299,12 +298,12 @@ def test_run_oof_recovers_corrupt_fold(tmp_path: Path, load_oof_fixture):
 
     recovered_predictions, recovered_truth = oof.run_oof(**run_args)
 
-    # Only one fold retrains: four additional target models.
-    assert len(instances) == 12
+    # Only one fold retrains: one additional model per target.
+    assert len(instances) == 3 * len(targets)
 
     # Fold 0's training molecules are C and D (features 3 and 4).
     # Confirm the new models belong to that fold.
-    for instance in instances[8:]:
+    for instance in instances[2 * len(targets):]:
         assert set(instance.X_train[:, 0]) == {3.0, 4.0}
 
     prediction_keys = ["model_id", "inchikey_full", "fold", "target"]
@@ -321,7 +320,7 @@ def test_run_oof_recovers_corrupt_fold(tmp_path: Path, load_oof_fixture):
 
     # Confirm repaired artifacts are reusable.
     oof.run_oof(**run_args)
-    assert len(instances) == 12
+    assert len(instances) == 3 * len(targets)
 
 
 def test_run_oof_saved_tables_match_returned_tables(

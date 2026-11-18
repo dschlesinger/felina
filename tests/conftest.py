@@ -3,9 +3,24 @@
 import polars as pl
 import pytest
 
+from data_tools.datasets import challenge
+
 
 @pytest.fixture
-def stack_tables() -> tuple[pl.DataFrame, pl.DataFrame]:
+def stack_blends() -> dict[str, tuple[float, float]]:
+    """Return the model_a/model_b mixture behind each scored target's truth.
+
+    Keyed on the challenge's own targets, so the tables built from it are the
+    ones every validator expects without being told; a distinct blend each.
+    """
+    return {
+        target: (0.2 * (index + 1), 1.0 - 0.2 * (index + 1))
+        for index, target in enumerate(challenge().targets)
+    }
+
+
+@pytest.fixture
+def stack_tables(stack_blends) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Return fresh tables with known NNLS weights and a redundant model."""
     molecules = [
         ("SYNTHETIC_A", 0),
@@ -13,11 +28,9 @@ def stack_tables() -> tuple[pl.DataFrame, pl.DataFrame]:
         ("SYNTHETIC_C", 1),
         ("SYNTHETIC_D", 1),
     ]
+    # Each target's truth is a * model_a + b * model_b, so NNLS must recover (a, b, 0).
     target_values = {
-        "CYP1A2_pIC50_direct_inhibition": [0.2, 0.8, 0.0, 1.0],
-        "CYP2C9_pIC50_direct_inhibition": [0.4, 0.6, 0.0, 1.0],
-        "CYP2D6_pIC50_direct_inhibition": [0.6, 0.4, 0.0, 1.0],
-        "CYP3A4_pIC50_direct_inhibition": [0.8, 0.2, 0.0, 1.0],
+        target: [a, b, 0.0, 1.0] for target, (a, b) in stack_blends.items()
     }
     model_values = {
         "model_a": [1.0, 0.0, 0.0, 1.0],

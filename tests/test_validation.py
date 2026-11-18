@@ -21,12 +21,7 @@ def test_validation_predictions_and_truth(
     monkeypatch: pytest.MonkeyPatch,
     shared_block: bool,
 ): 
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": [
@@ -85,7 +80,7 @@ def test_validation_predictions_and_truth(
         cache_dir=tmp_path / "features",
     )
 
-    assert result.height == 8
+    assert result.height == 2 * len(targets)
     assert set(result.columns) == {
         "model_id", "inchikey_full", "target", "pred"
     }
@@ -106,13 +101,13 @@ def test_validation_predictions_and_truth(
         rows = result.filter(pl.col("target") == target).sort("inchikey_full")
         np.testing.assert_array_equal(rows["pred"].to_numpy(), [4.0, 5.0])
 
-    # Four distinct models, each fitted on training rows only.
-    assert len(instances) == 4
+    # One model per target, each fitted on training rows only.
+    assert len(instances) == len(targets)
     for model in instances:
         np.testing.assert_array_equal(model.X_train, [[1.0], [2.0], [3.0]])
         np.testing.assert_array_equal(model.y_train, [5.0, 6.0, 7.0])
 
-    assert truth.height == 8
+    assert truth.height == 2 * len(targets)
     assert set(truth.columns) == {"inchikey_full", "target", "truth"}
     assert set(truth.select("inchikey_full", "target").iter_rows()) == expected_keys
 
@@ -121,12 +116,7 @@ def test_validation_predictions_and_truth(
         np.testing.assert_array_equal(rows["truth"].to_numpy(), [5.5, 6.5])
 
 def test_validation_respects_pinned_split(tmp_path, monkeypatch):
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": [
@@ -178,7 +168,7 @@ def test_validation_respects_pinned_split(tmp_path, monkeypatch):
         cache_dir=tmp_path / "features",
     )
 
-    assert len(instances) == 4
+    assert len(instances) == len(targets)
 
     for model in instances:
         np.testing.assert_array_equal(model.X_train, [[1.0], [2.0], [3.0]])
@@ -189,12 +179,7 @@ def test_validation_respects_pinned_split(tmp_path, monkeypatch):
     assert set(truth["inchikey_full"]) == {"VAL_A-full", "VAL_B-full"}
       
 def test_validation_handles_missing_labels(tmp_path, monkeypatch):
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": [
@@ -282,7 +267,8 @@ def test_validation_handles_missing_labels(tmp_path, monkeypatch):
     }
     expected_keys.remove(("VAL_A-full", targets[0]))
 
-    assert result.height == truth.height == 7
+    # One label was blanked for one validation molecule, so one key is gone.
+    assert result.height == truth.height == 2 * len(targets) - 1
     assert set(truth.select("inchikey_full", "target").iter_rows()) == expected_keys
 
     for target in targets:
@@ -313,12 +299,7 @@ def test_validation_handles_missing_labels(tmp_path, monkeypatch):
 def test_validation_rejects_invalid_inputs(
     tmp_path, monkeypatch, case, message
 ):  
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": [
@@ -341,6 +322,7 @@ def test_validation_rejects_invalid_inputs(
     model_params = {}
     input_names = ["rdkit"]
     targets = targets.copy()
+    scored_targets = None
 
     if case == "missing_split":
         df = df.drop("split")
@@ -386,7 +368,12 @@ def test_validation_rejects_invalid_inputs(
         df = df.with_columns(pl.lit(1.0).alias("unexpected_target"))
 
     elif case == "missing_target":
-        targets = targets[:-1]
+        # Dropping the last target from a one-target challenge would leave an
+        # empty list, which is a different complaint. Declare an extra scored
+        # column instead, so the request is non-empty but incomplete.
+        extra = "Emax_log2FC"
+        df = df.with_columns(pl.lit(1.0).alias(extra))
+        scored_targets = [*targets, extra]
 
     elif case == "invalid_model_id":
         model_id = ""
@@ -406,6 +393,7 @@ def test_validation_rejects_invalid_inputs(
             input_names=input_names,
             targets=targets,
             cache_dir=tmp_path / "features",
+            scored_targets=scored_targets,
         )
 
 @pytest.mark.parametrize(
@@ -423,12 +411,7 @@ def test_validation_rejects_invalid_inputs(
 def test_validation_rejects_invalid_features(
     tmp_path, monkeypatch, case, message
 ):
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": [
@@ -517,12 +500,7 @@ def test_validation_rejects_invalid_features(
 def test_validation_rejects_invalid_predictions(
     tmp_path, monkeypatch, bad_output, message
 ):
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     df = pl.DataFrame({
         "inchikey_full": [

@@ -267,10 +267,12 @@ def test_rejects_null_values(oof_tables, table_name: str, column: str) -> None:
 def test_rejects_multiple_folds_per_molecule(oof_tables, table_name: str) -> None:
     predictions, truth = oof_tables
 
+    target = challenge().targets[0]
+
     changed_fold = (
         pl.when(
             (pl.col("inchikey_full") == "SYNTHETIC_A")
-            & (pl.col("target") == "CYP1A2_pIC50_direct_inhibition")
+            & (pl.col("target") == target)
         )
         .then(pl.lit(1))
         .otherwise(pl.col("fold"))
@@ -283,7 +285,7 @@ def test_rejects_multiple_folds_per_molecule(oof_tables, table_name: str) -> Non
     else:
         conflicting_row = truth.filter(
             (pl.col("inchikey_full") == "SYNTHETIC_A")
-            & (pl.col("target") == "CYP1A2_pIC50_direct_inhibition")
+            & (pl.col("target") == target)
         ).with_columns(
             pl.lit(1, dtype=truth["fold"].dtype).alias("fold")
         )
@@ -355,12 +357,9 @@ def test_rejects_predictions_belong_to_another_fold(oof_tables) -> None:
 def test_reject_scored_target_absent_from_requested_fold(oof_tables) -> None:
     predictions, truth = oof_tables
 
-    target = "CYP1A2_pIC50_direct_inhibition"
-
-    truth = truth.filter(
-        ~((pl.col("fold") == 0) & (pl.col("target") == target))
-    )
-    predictions = predictions.filter(pl.col("target") != target)
+    # Stripping the challenge's one scored target out of the fold would leave no truth rows at
+    # all, a different complaint, so the absent target is declared rather than removed.
+    targets = [*challenge().targets, "Emax_log2FC"]
 
     with pytest.raises(ValueError, match="Fold 0 is missing scored targets"):
         _validate_inputs(
@@ -368,6 +367,7 @@ def test_reject_scored_target_absent_from_requested_fold(oof_tables) -> None:
             heldout_fold=0,
             predictions=predictions,
             model_id="model_a",
+            targets=targets,
         )
 
 
@@ -395,7 +395,7 @@ def test_accepts_molecule_lacking_one_target_label(oof_tables) -> None:
 
     missing_pair = (
         (pl.col("inchikey_full") == "SYNTHETIC_A")
-        & (pl.col("target") == "CYP1A2_pIC50_direct_inhibition")
+        & (pl.col("target") == challenge().targets[0])
     )
 
     truth = truth.filter(~missing_pair)
@@ -1139,12 +1139,7 @@ def test_generate_fold_predictions_valid_inputs(
     monkeypatch: pytest.MonkeyPatch,
     shared_block: bool,
 ) -> None:
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1200,7 +1195,7 @@ def test_generate_fold_predictions_valid_inputs(
         cache_dir=tmp_path / "features",
     )
 
-    assert result.height == 8
+    assert result.height == 2 * len(targets)
     assert set(result.columns) == {
         "model_id", "inchikey_full", "fold", "target", "pred"
     }
@@ -1222,8 +1217,8 @@ def test_generate_fold_predictions_valid_inputs(
         rows = result.filter(pl.col("target") == target).sort("inchikey_full")
         np.testing.assert_array_equal(rows["pred"].to_numpy(), [4.0, 5.0])
 
-    # Four distinct models, each fitted on training rows only.
-    assert len(instances) == 4
+    # One model per target, each fitted on training rows only.
+    assert len(instances) == len(targets)
     for model in instances:
         np.testing.assert_array_equal(model.X_train, [[1.0], [2.0], [3.0]])
         np.testing.assert_array_equal(model.y_train, [5.0, 6.0, 7.0])
@@ -1233,12 +1228,7 @@ def test_generate_fold_predictions_omits_missing_heldout_labels(
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1296,7 +1286,7 @@ def test_generate_fold_predictions_omits_missing_heldout_labels(
         cache_dir=tmp_path / "features",
     )
 
-    assert result.height == 7
+    assert result.height == 2 * len(targets) - 1
     assert set(result.columns) == {
         "model_id", "inchikey_full", "fold", "target", "pred"
     }
@@ -1321,8 +1311,8 @@ def test_generate_fold_predictions_omits_missing_heldout_labels(
         expected = [5.0] if target == targets[0] else [4.0, 5.0]
         np.testing.assert_array_equal(rows["pred"].to_numpy(), expected)
 
-    # Four distinct models, each fitted on training rows only.
-    assert len(instances) == 4
+    # One model per target, each fitted on training rows only.
+    assert len(instances) == len(targets)
     for model in instances:
         np.testing.assert_array_equal(model.X_train, [[1.0], [2.0], [3.0]])
         np.testing.assert_array_equal(model.y_train, [5.0, 6.0, 7.0])
@@ -1332,12 +1322,7 @@ def test_generate_fold_predictions_excludes_missing_training_labels(
     tmp_path: Path, 
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1395,7 +1380,7 @@ def test_generate_fold_predictions_excludes_missing_training_labels(
         cache_dir=tmp_path / "features",
     )
 
-    assert result.height == 8
+    assert result.height == 2 * len(targets)
     assert set(result.columns) == {
         "model_id", "inchikey_full", "fold", "target", "pred"
     }
@@ -1418,7 +1403,7 @@ def test_generate_fold_predictions_excludes_missing_training_labels(
         rows = result.filter(pl.col("target") == target).sort("inchikey_full")
         np.testing.assert_array_equal(rows["pred"].to_numpy(), [4.0, 5.0])
 
-    assert len(instances) == 4
+    assert len(instances) == len(targets)
 
     for target, model in zip(targets, instances, strict=True):
         if target == targets[0]:
@@ -1436,12 +1421,7 @@ def test_generate_fold_predictions_rejects_train_heldout_overlap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    targets = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1502,12 +1482,7 @@ def test_generate_fold_predictions_rejects_nonfinite_heldout_features(
     monkeypatch: pytest.MonkeyPatch,
     bad_value,
 ) -> None:
-    targets = [
-    "CYP1A2_pIC50_direct_inhibition",
-    "CYP2C9_pIC50_direct_inhibition",
-    "CYP2D6_pIC50_direct_inhibition",
-    "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1574,12 +1549,7 @@ def test_generate_fold_predictions_rejects_invalid_prediction_shape(
     monkeypatch: pytest.MonkeyPatch,
     bad_output,
 ) -> None:
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-        ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1637,12 +1607,7 @@ def test_generate_fold_predictions_rejects_wrong_prediction_count(
     monkeypatch: pytest.MonkeyPatch,
     bad_output,
 ) -> None:
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1698,12 +1663,7 @@ def test_generate_fold_predictions_rejects_nonfinite_predictions(
     monkeypatch: pytest.MonkeyPatch,
     bad_value,
 ) -> None:
-    targets = [
-        "CYP1A2_pIC50_direct_inhibition",
-        "CYP2C9_pIC50_direct_inhibition",
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    targets = list(challenge().targets)
 
     train_df = pl.DataFrame({
         "inchikey_full": ["TRAIN_A-full", "TRAIN_B-full", "TRAIN_C-full"],
@@ -1764,10 +1724,11 @@ def loader_tables() -> tuple[pl.DataFrame, pl.DataFrame]:
         "inchikey_full": ["A-full", "B-full", "C-full", "D-full"],
         "inchikey_block": ["A", "B", "C", "D"],
         "SMILES": ["C", "CC", "CCC", "CCCC"],
-        "CYP1A2_pIC50_direct_inhibition": [5.0, None, 6.0, 7.0],
-        "CYP2C9_pIC50_direct_inhibition": [5.0, 6.0, 7.0, 8.0],
-        "CYP2D6_pIC50_direct_inhibition": [4.0, 5.0, 6.0, 7.0],
-        "CYP3A4_pIC50_direct_inhibition": [6.0, 7.0, 8.0, 9.0],
+        # B's label for the first scored target is missing; the row still belongs to a fold.
+        **{
+            target: [5.0, None, 6.0, 7.0] if index == 0 else [5.0, 6.0, 7.0, 8.0]
+            for index, target in enumerate(challenge().targets)
+        },
     })
 
     folds = pl.DataFrame({
@@ -1825,7 +1786,7 @@ def test_load_oof_data_preserves_missing_target_labels(tmp_path: Path, loader_ta
 
     result = _load_oof_data(data_path, folds_path)
 
-    target = "CYP1A2_pIC50_direct_inhibition"
+    target = challenge().targets[0]
     assert result[target].null_count() == 1
     assert result.filter(pl.col("inchikey_block") == "B")[target].item() is None
     assert result.height == 4
