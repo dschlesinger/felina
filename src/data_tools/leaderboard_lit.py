@@ -8,8 +8,8 @@ fetches each one into `<RESULTS_FOLDER>/leaderboard_lit/<space>/<user>/<target>/
     `*.git` URL, and any other URL that answers `git ls-remote`) are shallow-cloned into `repo/`, pinned to the commit
     or branch in the link; the file or folder the link points at is recorded as `path`. Files over `--max-mb` are left
     out of the download and listed in `LARGE_FILES_SKIPPED.txt`; Git LFS files are never downloaded.
-  * nothing over 500 MB is downloaded: larger pages and files are refused, and a clone is aborted once the
-    repository on disk passes 500 MB.
+  * nothing over 50 MB is downloaded: larger pages and files are refused, and a clone is aborted once the
+    repository on disk passes 50 MB.
   * Google Docs are exported as plain text, Google Drive files are downloaded directly.
   * anything else is downloaded; HTML is saved as `page.html` and parsed into `page.txt` (readable text) and
     `links.txt` (every link on the page), other content types are saved as `page.<ext>`.
@@ -51,7 +51,7 @@ LINK_COLUMN = "Model Report Link"
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 URL_RE = re.compile(r"https?://[^\s,;<>\"']+")
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) leaderboard-lit"
-MAX_DOWNLOAD_BYTES = 500_000_000  # hard cap per link: larger pages/files are refused, larger repos aborted
+MAX_DOWNLOAD_BYTES = 50_000_000  # hard cap per link: larger pages/files are refused, larger repos aborted
 THIN_CHARS = 200  # parsed pages with less text than this are flagged as `thin`
 GIT_ENV = {
     **os.environ,
@@ -743,7 +743,7 @@ def main(argv: list[str] | None = None) -> None:
         "--max-mb",
         type=float,
         default=5,
-        help="skip repo files over this size (default 5; 0 = up to the 500 MB cap)",
+        help="skip repo files over this size (default 5; 0 = up to the 50 MB cap)",
     )
     parser.add_argument(
         "--no-probe",

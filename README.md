@@ -174,8 +174,8 @@ leaderboard-lit      # fetch every method report / repo linked from the saved le
 and downloads every `Model Report Link` into `results/leaderboard_lit/<space>/<user>/<target>/`. Git repositories
 (GitHub, gists, Hugging Face, tangled, GitLab, Codeberg, Bitbucket, and any other URL that answers `git ls-remote`)
 are shallow-cloned at the linked commit or branch, with files over `--max-mb` (default 5) and Git LFS files never
-downloaded. Nothing over 500 MB is fetched: larger pages and files are refused, and a clone is aborted once the repo
-passes 500 MB (both show up as failures). Google Docs are
+downloaded. Nothing over 50 MB is fetched: larger pages and files are refused, and a clone is aborted once the repo
+passes 50 MB (both show up as failures). Google Docs are
 exported as text, Drive files downloaded, and every other page saved as `page.html` plus parsed `page.txt` and
 `links.txt`. `index.csv` records each link's status; `FAILURES.md` lists the ones that failed (HTTP 403/404, missing
 repos, timeouts) or came back nearly empty (login walls, JavaScript-only pages). Reruns retry only what failed.
