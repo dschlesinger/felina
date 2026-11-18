@@ -12,25 +12,23 @@ def _csv(tmp_path, text):
     return path
 
 
-def test_loads_shorthand_and_full_names(tmp_path):
-    path = _csv(tmp_path, "isoform,mean,std\n3A4,5.0,1.2\nCYP2C9,4.4,0.9\nCYP1A2_pIC50_direct_inhibition,4.0,1.0\n")
-    assert load_targets(path) == {
-        "CYP3A4_pIC50_direct_inhibition": (5.0, 1.2),
-        "CYP2C9_pIC50_direct_inhibition": (4.4, 0.9),
-        "CYP1A2_pIC50_direct_inhibition": (4.0, 1.0),
-    }
+def test_loads_the_challenges_own_target_names(tmp_path):
+    # The scored dataset names its columns: a cell matches a target column, or the shorthand reported for
+    # one. This challenge's shorthand is the column itself, so both routes land on the same name.
+    path = _csv(tmp_path, "isoform,mean,std\npEC50,5.0,1.2\n")
+    assert load_targets(path) == {"pEC50": (5.0, 1.2)}
 
 
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("isoform,mean\n3A4,5.0\n", "no column"),
+        ("isoform,mean\npEC50,5.0\n", "no column"),
         ("isoform,mean,std\n", "no rows"),
-        ("isoform,mean,std\n3A4,high,1.2\n", "must be numbers"),
-        ("isoform,mean,std\n3A4,5.0,0\n", "above zero"),
-        ("isoform,mean,std\n3A4,5.0,-1\n", "above zero"),
-        ("isoform,mean,std\n3A4,nan,1.2\n", "finite"),
-        ("isoform,mean,std\n3A4,5.0,1.2\nCYP3A4,4.0,1.0\n", "twice"),
+        ("isoform,mean,std\npEC50,high,1.2\n", "must be numbers"),
+        ("isoform,mean,std\npEC50,5.0,0\n", "above zero"),
+        ("isoform,mean,std\npEC50,5.0,-1\n", "above zero"),
+        ("isoform,mean,std\npEC50,nan,1.2\n", "finite"),
+        ("isoform,mean,std\npEC50,5.0,1.2\npEC50,4.0,1.0\n", "twice"),
     ],
 )
 def test_rejects_bad_csv(tmp_path, text, message):
@@ -39,23 +37,19 @@ def test_rejects_bad_csv(tmp_path, text, message):
 
 
 def test_loads_target_header(tmp_path):
-    path = _csv(tmp_path, "target,mean,std\n3A4,5.0,1.2\nCYP2C9,4.4,0.9\nCYP1A2_pIC50_direct_inhibition,4.0,1.0\n")
-    assert load_targets(path) == {
-        "CYP3A4_pIC50_direct_inhibition": (5.0, 1.2),
-        "CYP2C9_pIC50_direct_inhibition": (4.4, 0.9),
-        "CYP1A2_pIC50_direct_inhibition": (4.0, 1.0),
-    }
+    path = _csv(tmp_path, "target,mean,std\npEC50,5.0,1.2\n")
+    assert load_targets(path) == {"pEC50": (5.0, 1.2)}
 
 
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("target,mean\n3A4,5.0\n", "no column\\(s\\) std"),
+        ("target,mean\npEC50,5.0\n", "no column\\(s\\) std"),
         ("mean,std\n5.0,1.2\n", "no column\\(s\\) target"),
         ("target,mean,std\n", "no rows"),
-        ("target,mean,std\n3A4,high,1.2\n", "must be numbers"),
-        ("target,mean,std\n3A4,5.0,0\n", "above zero"),
-        ("target,mean,std\n3A4,5.0,1.2\nCYP3A4,4.0,1.0\n", "twice"),
+        ("target,mean,std\npEC50,high,1.2\n", "must be numbers"),
+        ("target,mean,std\npEC50,5.0,0\n", "above zero"),
+        ("target,mean,std\npEC50,5.0,1.2\npEC50,4.0,1.0\n", "twice"),
     ],
 )
 def test_rejects_bad_csv_with_target_header(tmp_path, text, message):

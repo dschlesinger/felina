@@ -11,21 +11,10 @@ from data_tools.datasets import blind_spec, challenge, parse_selector, registry
 
 EXPECTED = [
     "train",
+    "emax_train",
     "test",
     "test_unblinded",
-    "tdi_train",
-    "emax_train",
-    "single_concentration_train",
-    "pubchem_aid1851",
-    "p450_family",
-    "expansionrx",
-    "tdc_hlm",
-    "tdc_rlm",
-    "tdc_clearance_microsome_az",
-    "tdc_half_life_obach",
-    "tdc_cyp2c9_substrate",
-    "tdc_cyp2d6_substrate",
-    "tdc_cyp3a4_substrate",
+    "structure_test",
 ]
 
 
@@ -33,21 +22,24 @@ def test_registry_discovers_every_dataset_in_order():
     assert list(registry()) == EXPECTED
 
 
-def test_a_dataset_package_contributes_one_dataset_not_one_per_submodule():
-    # pubchem_aid1851 and p450_family are packages: their fetch/derive code sits beside the spec. Discovery must
-    # take the package's SPEC and leave its implementation alone.
-    import data_tools.dataset_defs.p450_family as p450
+def test_a_group_contributes_its_datasets_and_skips_its_private_helpers():
+    # pxr/ is a group: the challenge's datasets sit in it beside _reshape.py, the column mapping and derive
+    # steps they share. Discovery must recurse into the group, collect the specs, and skip the underscore
+    # module rather than demanding a SPEC from it.
+    import data_tools.dataset_defs.pxr as pxr
 
-    assert Path(p450.__file__).name == "__init__.py", "p450_family should be a package holding its own code"
-    assert [n for n in registry() if n.startswith("p450")] == ["p450_family"]
-    assert sorted(registry()["p450_family"].sources) == ["bindingdb", "chembl"]
+    assert Path(pxr.__file__).name == "__init__.py"
+    assert not hasattr(pxr, "SPEC"), "a group holds datasets; it is not one"
+    assert list(registry()) == EXPECTED
+    assert sorted(registry()["train"].sources) == ["challenge"]
+    assert sorted(registry()["emax_train"].sources) == ["emax"]
 
 
 def test_dataset_specific_code_lives_under_dataset_defs():
     import data_tools
 
     shared = {p.stem for p in Path(data_tools.__file__).parent.glob("*.py")}
-    assert not shared & {"pubchem", "family_datasets", "family_heads"}, "a dataset's code escaped dataset_defs"
+    assert not shared & {"pxr", "reshape"}, "a dataset's code escaped dataset_defs"
 
 
 def test_every_spec_is_self_consistent():
@@ -163,8 +155,10 @@ def _spec(**kwargs) -> DatasetSpec:
 def test_challenge_is_the_dataset_declaring_scored():
     spec = challenge()
     assert spec.scored and spec.name == "train"
-    assert spec.targets == tuple(f"CYP{i}_pIC50_direct_inhibition" for i in ("1A2", "2C9", "2D6", "3A4"))
-    assert spec.label_suffix == "_pIC50_direct_inhibition"
+    assert spec.targets == ("pEC50",)
+    # No suffix to trim: the scored column is already the name it reports under.
+    assert spec.label_suffix == ""
+    assert spec.shorthand("pEC50") == "pEC50"
 
 
 def test_challenge_dataset_env_var_picks_the_scored_dataset(monkeypatch):
@@ -223,9 +217,9 @@ def test_resolve_targets_names_the_unknown_selector_and_the_choices():
 
 
 def test_parse_selector_splits_a_name_from_its_targets():
-    spec, targets = parse_selector("train:CYP2D6,CYP3A4")
+    spec, targets = parse_selector("train:pEC50")
     assert spec.name == "train"
-    assert targets == ["CYP2D6_pIC50_direct_inhibition", "CYP3A4_pIC50_direct_inhibition"]
+    assert targets == ["pEC50"]
 
 
 def test_parse_selector_without_targets_takes_them_all():
@@ -243,16 +237,12 @@ def test_parse_selector_rejects_a_dataset_that_is_not_scored():
 
 
 def test_resolve_targets_accepts_an_unambiguous_tail_of_a_shorthand():
-    # The documented `--targets 3A4` shorthand: a tail of CYP3A4, and the only target it can mean.
-    spec = challenge()
-    assert spec.resolve_targets(["3A4", "2D6"]) == [
-        "CYP2D6_pIC50_direct_inhibition",
-        "CYP3A4_pIC50_direct_inhibition",
-    ]
+    # The documented tail shorthand, on this challenge's one target: `EC50` can only mean pEC50.
+    assert challenge().resolve_targets(["EC50"]) == ["pEC50"]
 
 
 def test_resolve_targets_ignores_case():
-    assert challenge().resolve_targets(["cyp1a2"]) == ["CYP1A2_pIC50_direct_inhibition"]
+    assert challenge().resolve_targets(["pec50"]) == ["pEC50"]
 
 
 def test_resolve_targets_rejects_a_tail_that_names_several_targets():

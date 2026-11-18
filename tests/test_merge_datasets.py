@@ -4,7 +4,8 @@
 import polars as pl
 import pytest
 
-from data_tools.merge_datasets import merge, parse_dataset_specs
+from data_tools.dataset_spec import Source
+from data_tools.merge_datasets import SOURCES, merge, parse_dataset_specs
 
 ASPIRIN = "CC(=O)OC1=CC=CC=C1C(=O)O"
 CAFFEINE = "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"
@@ -12,34 +13,47 @@ IBUPROFEN = "CC(C)CC1=CC=C(C=C1)C(=O)O"
 PHENOL = "C1=CC=C(C=C1)O"
 TOLUENE = "CC1=CC=CC=C1"
 
+# The shipped challenge has no external, classification or log-scaled source, but the merge still
+# supports all three. They are exercised through synthetic sources registered for the test, so the code
+# path stays covered whatever datasets the challenge of the day ships.
+_EXTRA_SOURCES = {
+    "ext": Source(
+        kind="external",
+        heads=[(r"^(pEC50)_ext$", "{}-Ext"), (r"^(Emax_log2FC)_ext$", "{}-Ext")],
+        filename="external.csv",
+    ),
+    "ext_sparse": Source(kind="external", heads=[(r"^(pEC50)_sparse$", "{}-Sparse")], filename="external.csv"),
+    "binary": Source(
+        kind="external", heads=[(r"^(induces)$", "{}-Binary")], task="classification", filename="binary.csv"
+    ),
+    "clint": Source(kind="external", heads=[(r"^(CLint)$", "{}-Clint")], log10p1=True, filename="clint.csv"),
+}
+
 
 @pytest.fixture()
-def data_dir(tmp_path):
+def data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("data_tools.merge_datasets.SOURCES", {**SOURCES, **_EXTRA_SOURCES})
     names = ["OCNT-1", "OCNT-2", "OCNT-3"]
     smiles = [ASPIRIN, CAFFEINE, IBUPROFEN]
     pl.DataFrame(
-        {
-            "Molecule_Name": names,
-            "SMILES": smiles,
-            "CYP2D6_pIC50_direct_inhibition": [5.0, None, 6.0],
-            "CYP3A4_pIC50_direct_inhibition": [4.5, 5.5, None],
-        }
+        {"Molecule_Name": names, "SMILES": smiles, "pEC50": [5.0, None, 6.0]}
     ).write_csv(tmp_path / "train.csv")
     pl.DataFrame(
         {
             "Molecule_Name": names + ["OCNT-4"],
             "SMILES": smiles + [PHENOL],
-            "CYP3A4_pIC50_TDI_condition": [4.0, None, 5.0, 6.0],
+            "Emax_log2FC": [1.5, None, 2.0, 2.5],
+            "Emax_vs_pos_ctrl": [0.5, 0.7, None, 0.9],
         }
-    ).write_csv(tmp_path / "tdi_train.csv")
+    ).write_csv(tmp_path / "emax_train.csv")
     pl.DataFrame(
         {
             "SMILES": [ASPIRIN, TOLUENE, "CCO"],
-            "CYP2D6_pIC50_bindingdb": [7.0, 5.0, None],
-            "CYP2D6_pIC50_chembl": [None, None, 3.0],
-            "CYP1A2_pIC50_bindingdb": [6.0, None, None],
+            "pEC50_ext": [7.0, 5.0, None],
+            "pEC50_sparse": [None, None, 3.0],
+            "Emax_log2FC_ext": [6.0, None, None],
         }
-    ).write_csv(tmp_path / "family_heads.csv")
+    ).write_csv(tmp_path / "external.csv")
     return tmp_path
 
 
@@ -49,39 +63,39 @@ def _merge(data_dir, specs):
 
 def test_challenge_only_has_scored_heads(data_dir):
     table, heads, scored, _ = _merge(data_dir, [])
-    assert heads == scored == ["CYP2D6-Direct", "CYP3A4-Direct"]
-    assert len(table) == 3
+    assert heads == scored == ["pEC50-PXR"]
+    assert len(table) == 2  # caffeine carries no scored label, so the challenge source drops it
 
 
 def test_heads_are_split_by_source(data_dir):
-    table, heads, _, _ = _merge(data_dir, ["tdi", "bindingdb"])
-    assert {"CYP3A4-TDI", "CYP2D6-BindingDB", "CYP1A2-BindingDB"} <= set(heads)
+    table, heads, _, _ = _merge(data_dir, ["emax", "ext"])
+    assert {"Emax_log2FC-PXR", "Emax_vs_pos_ctrl-PXR", "pEC50-Ext", "Emax_log2FC-Ext"} <= set(heads)
     aspirin = table.filter(pl.col("SMILES") == ASPIRIN).row(0, named=True)
-    assert aspirin["CYP2D6-Direct"] == 5.0
-    assert aspirin["CYP2D6-BindingDB"] == 7.0
-    assert aspirin["CYP3A4-TDI"] == 4.0
+    assert aspirin["pEC50-PXR"] == 5.0
+    assert aspirin["Emax_log2FC-PXR"] == 1.5
+    assert aspirin["pEC50-Ext"] == 7.0  # same molecule, different assay: its own head, never pooled
 
 
 def test_target_filter_restricts_heads(data_dir):
-    _, heads, _, _ = _merge(data_dir, ["bindingdb:CYP2D6"])
-    assert "CYP2D6-BindingDB" in heads and "CYP1A2-BindingDB" not in heads
+    _, heads, _, _ = _merge(data_dir, ["emax:Emax_log2FC"])
+    assert "Emax_log2FC-PXR" in heads and "Emax_vs_pos_ctrl-PXR" not in heads
 
 
 def test_external_only_molecules_are_train_and_keep_smiles(data_dir):
-    table, _, _, _ = _merge(data_dir, ["bindingdb"])
+    table, _, _, _ = _merge(data_dir, ["ext"])
     toluene = table.filter(pl.col("SMILES") == TOLUENE).row(0, named=True)
     assert toluene["split"] == "train"
-    assert toluene["CYP2D6-Direct"] is None
+    assert toluene["pEC50-PXR"] is None
 
 
 def test_source_without_labels_adds_no_rows(data_dir):
-    table, _, _, _ = _merge(data_dir, ["chembl"])
-    assert "CCO" in table["SMILES"].to_list()  # the only chembl-labelled molecule
-    assert TOLUENE not in table["SMILES"].to_list()  # bindingdb-only row must not leak in
+    table, _, _, _ = _merge(data_dir, ["ext_sparse"])
+    assert "CCO" in table["SMILES"].to_list()  # the only molecule labelled for this head
+    assert TOLUENE not in table["SMILES"].to_list()  # a row labelled only for the other head must not leak in
 
 
 def test_inhouse_only_molecule_is_train(data_dir):
-    table, _, _, _ = _merge(data_dir, ["tdi"])
+    table, _, _, _ = _merge(data_dir, ["emax"])
     phenol = table.filter(pl.col("SMILES") == PHENOL).row(0, named=True)
     assert phenol["split"] == "train"
 
@@ -90,7 +104,7 @@ def test_split_ignores_dataset_choice(data_dir):
     held = lambda specs: sorted(  # noqa: E731
         _merge(data_dir, specs)[0].filter(pl.col("split") != "train")["SMILES"].to_list()
     )
-    assert held([]) == held(["tdi", "bindingdb", "chembl"])
+    assert held([]) == held(["emax", "ext", "ext_sparse"])
 
 
 def test_unknown_dataset_rejected():
@@ -98,42 +112,39 @@ def test_unknown_dataset_rejected():
         parse_dataset_specs(["nope"])
 
 
-def _stability_files(data_dir):
-    (data_dir / "metabolism").mkdir()
-    pl.DataFrame({"SMILES": [ASPIRIN, ASPIRIN, TOLUENE, "CCO"], "Y": [1, 0, 0, 1]}).write_csv(
-        data_dir / "metabolism" / "tdc_hlm.csv"
+def _scaled_files(data_dir):
+    pl.DataFrame({"SMILES": [ASPIRIN, ASPIRIN, TOLUENE, "CCO"], "induces": [1, 0, 0, 1]}).write_csv(
+        data_dir / "binary.csv"
     )
-    pl.DataFrame(
-        {"SMILES": [ASPIRIN, IBUPROFEN], "HLM CLint": [9.0, 0.0], "MLM CLint": [99.0, None]}
-    ).write_csv(data_dir / "metabolism" / "expansionrx.csv")
+    pl.DataFrame({"SMILES": [ASPIRIN, IBUPROFEN], "CLint": [9.0, 0.0]}).write_csv(data_dir / "clint.csv")
 
 
 def test_binary_source_is_classification_and_settles_ties(data_dir):
-    _stability_files(data_dir)
-    table, _, _, tasks = _merge(data_dir, ["tdc_hlm"])
-    assert tasks["HLM-TDC"] == "classification" and tasks["CYP2D6-Direct"] == "regression"
+    _scaled_files(data_dir)
+    table, _, _, tasks = _merge(data_dir, ["binary"])
+    assert tasks["induces-Binary"] == "classification" and tasks["pEC50-PXR"] == "regression"
     aspirin = table.filter(pl.col("SMILES") == ASPIRIN).row(0, named=True)
-    assert aspirin["HLM-TDC"] == 1.0  # duplicate labels 1 and 0 average to 0.5, ties go positive
+    assert aspirin["induces-Binary"] == 1.0  # duplicate labels 1 and 0 average to 0.5, ties go positive
 
 
 def test_clint_is_log_scaled(data_dir):
-    _stability_files(data_dir)
-    table, heads, _, tasks = _merge(data_dir, ["expansionrx"])
-    assert {"HLM-ExpansionRx", "MLM-ExpansionRx"} <= set(heads)
-    assert tasks["HLM-ExpansionRx"] == "regression"
+    _scaled_files(data_dir)
+    table, heads, _, tasks = _merge(data_dir, ["clint"])
+    assert "CLint-Clint" in heads
+    assert tasks["CLint-Clint"] == "regression"
     ibuprofen = table.filter(pl.col("SMILES") == IBUPROFEN).row(0, named=True)
-    assert ibuprofen["HLM-ExpansionRx"] == 0.0  # log10(0 + 1)
+    assert ibuprofen["CLint-Clint"] == 0.0  # log10(0 + 1)
     aspirin = table.filter(pl.col("SMILES") == ASPIRIN).row(0, named=True)
-    assert abs(aspirin["HLM-ExpansionRx"] - 1.0) < 1e-9  # log10(9 + 1)
+    assert abs(aspirin["CLint-Clint"] - 1.0) < 1e-9  # log10(9 + 1)
 
 
-def test_specs_can_omit_challenge():
-    assert parse_dataset_specs(["tdi"], with_challenge=False) == {"tdi": None}
-    assert list(parse_dataset_specs(["tdi"])) == ["challenge", "tdi"]
+def test_specs_can_omit_challenge(data_dir):
+    assert parse_dataset_specs(["emax"], with_challenge=False) == {"emax": None}
+    assert list(parse_dataset_specs(["emax"])) == ["challenge", "emax"]
 
 
 def test_blind_matched_strategy_uses_the_blind_set_as_its_reference(data_dir):
-    """The held-out slices imitate data/test.csv instead of holding out whole scaffolds."""
+    """The held-out slices imitate the blind set instead of holding out whole scaffolds."""
     test_path = data_dir / "blind.csv"
     pl.DataFrame({"Molecule_Name": ["OCNT-9", "OCNT-10"], "SMILES": [TOLUENE, PHENOL]}).write_csv(
         test_path

@@ -1,6 +1,6 @@
-# openadmet-cyp
+# openadmet-pxr
 
-Code for the OpenADMET CYP Inhibition Blind Challenge.
+Code for the OpenADMET PXR Induction Blind Challenge.
 
 ## Setup
 
@@ -26,14 +26,15 @@ download-data              # same as `data fetch all`
 
 Fetching reuses raw files that are already on disk; `--redownload` goes back to the source. The derive step runs
 either way, so changing a reshape and re-running `data fetch NAME` rebuilds the model-ready table without
-touching the network. That matters most for `p450_family`, whose fetch crawls UniProt, ChEMBL, and BindingDB for
-hundreds of proteins, and for `pubchem_aid1851`, whose raw table is ~24 MB.
+touching the network. Every PXR dataset fetches a raw CSV and derives a model-ready table from it, which is
+where the challenge's column spellings (`Molecule Name` with a space, `Emax_estimate (log2FC vs. baseline)`)
+become the names the rest of the project uses.
 
 Each dataset lives under `src/data_tools/dataset_defs/` and holds everything it needs: its source URL, its `fetch`
 step, an optional `derive` step, the files each writes, and the training heads the result offers (`--datasets
-NAME:TARGET`). A simple dataset is one module (`train.py`); one that brings its own crawling or reshaping code is a
-directory holding that code next to the spec (`pubchem_aid1851/`, `p450_family/`); `metabolism/` just groups
-related datasets. Adding a dataset means adding a module there and changing nothing else —
+NAME:TARGET`). A simple dataset is one module; one that brings its own crawling or reshaping code is a
+directory holding that code next to the spec; `pxr/` groups this challenge's datasets, which share the
+column mapping and derive steps in its private `_reshape.py`. Adding a dataset means adding a module there and changing nothing else —
 `data_tools.datasets.registry()` discovers it, `data list` shows it, and `--datasets` accepts it. See
 `src/data_tools/dataset_spec.py` for the fields.
 
@@ -43,19 +44,21 @@ One dataset declares `scored=True`: the challenge being evaluated. It carries th
 molecule and identifier column names, the suffix trimmed off a target for display, and the name of the
 dataset holding its blinded molecules. `data_tools.datasets.challenge()` returns it, and every evaluator
 reads the scored columns from there rather than holding its own copy, so the target list exists in exactly
-one place (`src/data_tools/dataset_defs/train.py`).
+one place (`src/data_tools/dataset_defs/pxr/train.py`).
 
 Switching challenge is a new scored dataset module plus `CHALLENGE_DATASET` naming it:
 
 ```bash
-CHALLENGE_DATASET=pxr_train evaluate-models --input morgan
+CHALLENGE_DATASET=train evaluate-models --input morgan
 ```
 
 Unset, the single dataset declaring `scored=True` is used; declaring two without setting the variable is an
 error that names both.
 
-`pubchem_aid1851` yields per-isoform auxiliary heads; `p450_family` (ChEMBL + BindingDB, Pfam PF00067) yields one
-`{gene}_{readout}_{source}` head per protein per source (IC50 only by default, so `{gene}_pIC50_{source}`).
+The PXR challenge scores one target, `pEC50` (−log10 molarity, 4,140 curves). `emax_train` offers the same
+curves' ceilings as auxiliary heads: `Emax_log2FC-PXR` (log2 fold change over baseline) and
+`Emax_vs_pos_ctrl-PXR` (the same ceiling against rifampicin, so 1.0 is a full inducer). `structure_test` holds
+the structure track's 184 blinded ligands.
 
 ### Structural identity
 
@@ -81,28 +84,27 @@ Pick the model with `--model`:
 
 ```bash
 train-model --list-datasets                     # selectable sources
-train-model --model chemprop --datasets challenge tdc_hlm pubchem:CYP1A2 bindingdb:CYP1A2,CYP2C8 --loss-function mae
-train-model --model chemeleon --datasets challenge pubchem:CYP1A2
-train-model --model unimol --datasets challenge pubchem:CYP1A2 --learning-rate 2e-4
+train-model --model chemprop --datasets challenge emax --loss-function mae
+train-model --model chemeleon --datasets challenge
+train-model --model unimol --datasets challenge emax --learning-rate 2e-4
 # configs x learning rates x seeds: repeat --datasets, add --n-seeds N (or --seeds 0 1 2) and, for unimol, several
 # --learning-rate values; one model per combination
 train-model --model unimol --n-seeds 3 --learning-rate 1e-2 1e-3 1e-4 \
     --datasets challenge \
-    --datasets challenge pubchem:CYP1A2 bindingdb:CYP2C8 \
-    --datasets pubchem:CYP1A2 bindingdb:CYP2C8
-# pretrain on stability, then train on the ADMET data plus auxiliary heads (chemprop/chemeleon)
-train-model --model chemprop --stage tdc_hlm tdc_rlm --stage challenge pubchem:CYP1A2
+    --datasets challenge emax \
+    --datasets emax:Emax_log2FC
+# pretrain on the induction ceiling, then train on the scored labels (chemprop/chemeleon)
+train-model --model chemprop --stage emax --stage challenge
 # same thing, with per-stage settings and an encoder-size sweep
-train-model --model chemprop --pretrain tdc_hlm --finetune challenge pubchem:CYP1A2 \
+train-model --model chemprop --pretrain emax --finetune challenge \
     --stage-epochs 30 50 --stage-freeze-epochs 0 5 --stage-lr-warmup-shape linear cosine \
     --stage-loss mae huber --huber-delta 0.5 --hidden-dims 300 600 --mpn-dropouts 0 0.1
 ```
 
-`--datasets` takes any name from `train-model --list-datasets` (`challenge`, `pubchem`,
-`bindingdb`, `tdi`, `tdc_hlm`, ...), as `NAME[:TARGET,TARGET]`; heads are named
-`{target}-{source}`. Only what you list is trained on: `--datasets challenge` is the
-challenge labels alone, `--datasets challenge pubchem` is both, and `--datasets pubchem`
-is the auxiliary data alone. The challenge data is still loaded in every case,
+`--datasets` takes any name from `train-model --list-datasets` (`challenge`, `emax`),
+as `NAME[:TARGET,TARGET]`; heads are named `{target}-{source}`. Only what you list is
+trained on: `--datasets challenge` is the scored pEC50 alone, `--datasets challenge emax`
+is both, and `--datasets emax` is the auxiliary data alone. The challenge data is still loaded in every case,
 since it provides the pinned train/val split and the validation molecules; with
 no `challenge` in the config its labels are just not trained on. For `unimol`, each
 challenge head is then scored with the same-target auxiliary head, so that RMSE carries a
@@ -127,7 +129,7 @@ Chemprop training options (`src/models/chemprop_ext.py` patches them into
 |---|---|
 | `--pretrain A B [--pretrain C] --finetune X Y` | Pretrain stages, then the evaluated final stage (shorthand for repeated `--stage`) |
 | `--stage-epochs`, `--stage-warmup-epochs`, `--stage-max-lr`, `--stage-lr-warmup-shape`, `--stage-lr-decay`, `--stage-freeze-epochs`, `--stage-loss` | Per-stage values, one per stage or one for all |
-| `--loss-function huber --huber-delta D` | Huber loss; `D` in pIC50 units |
+| `--loss-function huber --huber-delta D` | Huber loss; `D` in pEC50 units |
 | `--label-noise S`, `--label-shrink A` | Training-only target smoothing: Gaussian jitter, or pull toward the batch mean per head |
 | `--lr-warmup-shape linear\|cosine\|exp\|none`, `--lr-decay exp\|cosine\|linear\|constant` | Learning-rate schedule shape (chemprop's `--warmup-epochs`, `--init-lr`, `--max-lr`, `--final-lr` still apply) |
 | `--freeze-epochs N` | Keep the message-passing encoder frozen for the first `N` epochs |
@@ -221,7 +223,7 @@ names below; several names are hstacked into one feature matrix.
 | `atom_jepa` | `AtomJEPA` | 256 | fixed pretrained Atom-JEPA `molecules` encoder (3D, conformer generated by the package); needs `atom-jepa`, GPU recommended |
 | `atom_jepa_bio` | `AtomJEPABio` | 256 | fixed pretrained Atom-JEPA-Bio encoder (`molecules` continued on PCBA bioassays); same requirements |
 | `cyp_heme_v2` | `HemeCoordinationMotifs` | 13 | SMARTS counts for nitrogens able to ligate the heme iron, plus a steric-accessibility split |
-| `cyp_isoform_v2` | `IsoformPreferenceDescriptors` | 10 | Physicochemical descriptors chosen for the four scored isoforms, each cited |
+| `cyp_isoform_v2` | `IsoformPreferenceDescriptors` | 10 | Physicochemical descriptors chosen for the four CYP isoforms, each cited; kept from the CYP challenge |
 | `cyp_tdi_v2` | `MechanismBasedAlerts` | 6 | Structural alerts for time-dependent inactivation |
 
 The xTB blocks embed up to 10 ETKDG/MMFF conformers per molecule and run three
@@ -232,13 +234,14 @@ call (`--input xtb_solv_v1 xtb_elec_v1`) to compute each molecule once.
 
 There is no flag for which dataset is scored: the scored dataset spec names it and its target columns, and
 `CHALLENGE_DATASET` points at another (see The scored dataset). `--targets` only narrows which of its
-targets a run scores. It accepts a target's full column name, its shorthand (`CYP2D6` for
-`CYP2D6_pIC50_direct_inhibition`), or any unambiguous tail of one (`2D6`); matching ignores case, and a
-name that matches nothing is refused with the valid choices listed. One model is fitted per target, so
-narrowing is a compute lever as well as a reporting one.
+targets a run scores. It accepts a target's full column name, its shorthand (the column with
+`label_suffix` trimmed off, which for PXR's `pEC50` is the column itself), or any unambiguous tail of one
+(`EC50`); matching ignores case, and a name that matches nothing is refused with the valid choices listed.
+One model is fitted per target, so on a challenge with several targets narrowing is a compute lever as well
+as a reporting one.
 
 ```bash
-evaluate-models --targets 2D6 3A4                       # two of the scored targets
+evaluate-models --targets pEC50                         # the scored target (PXR scores only this one)
 evaluate-models --input morgan                          # one representation
 evaluate-models --input count_morgan rdkit --split butina --seed 0
 evaluate-models --input all                             # every representation on its own, one table
@@ -353,7 +356,8 @@ XGBoost uses `objective=reg:squarederror`, `booster=gbtree`, `tree_method=hist`,
 
 Constructors expose tree count, complexity controls, seed and worker count;
 the boosting wrappers also expose learning rate. The evaluator uses constructor
-defaults. These are baseline settings, not tuned CYP results.
+defaults. These are baseline settings, not tuned results, and they were measured on the CYP challenge
+this repo previously targeted.
 
 TabPFN does no gradient training: `fit` stores the training rows and the
 transformer conditions on them at predict time. Its constructor exposes
@@ -425,8 +429,8 @@ evaluate-models --models ridge random_forest lightgbm --input morgan --input rdk
   somewhere else instead; either way an existing file is never overwritten.
 - `--center-spread moments.csv`: recentre and rescale every prediction set onto a
   target mean and standard deviation per target, read from a CSV with the columns
-  `target,mean,std` (`3A4` or the full target column name; a CSV written before the
-  rename, whose first column is headed `isoform`, is still accepted). Each set is mapped so it
+  `target,mean,std` (a target column name or the shorthand reported for it; a CSV written
+  before the rename, whose first column is headed `isoform`, is still accepted). Each set is mapped so it
   carries exactly that mean and spread, with the cross-validation folds sharing the
   pooled out-of-fold scaling; the transformed predictions are what the run exports, and
   each model is also scored untransformed as a comparison row. Being monotone, it leaves
