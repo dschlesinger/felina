@@ -1,10 +1,16 @@
+import os
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from data_tools import leaderboard_lit
 from data_tools.leaderboard_lit import (
     GitTarget,
+    TooLarge,
     clone,
+    fetch_target,
     google_export,
     latest_snapshots,
     parse_git,
@@ -221,3 +227,65 @@ def test_write_reports_lists_failed_and_thin(tmp_path):
     )
     assert "| a |" not in report
     assert (tmp_path / "index.csv").read_text().count("\n") == 4
+
+
+def test_clone_aborts_over_the_size_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(leaderboard_lit, "MAX_DOWNLOAD_BYTES", 100_000)
+    src = tmp_path / "src"
+    src.mkdir()
+    _git(src, "init", "-q", "-b", "main")
+    for i in range(
+        3
+    ):  # small files each, too big together (random bytes do not compress)
+        (src / f"part{i}.bin").write_bytes(os.urandom(60_000))
+    _git(src, "add", ".")
+    _git(src, "commit", "-qm", "v1")
+
+    dest = tmp_path / "out"
+    with pytest.raises(TooLarge):
+        clone(GitTarget(f"file://{src}", None, "", "k"), dest, max_bytes=100_000)
+    result = fetch_target(
+        "git",
+        GitTarget(f"file://{src}", None, "", "k"),
+        [],
+        tmp_path / "out2",
+        100_000,
+        False,
+    )
+    assert result.status == "failed" and "limit" in result.detail
+    assert not (tmp_path / "out2" / "repo").exists()
+
+
+@pytest.fixture
+def server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"%PDF" + b"x" * 5000
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            if self.path == "/sized":
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_port}"
+    httpd.shutdown()
+
+
+@pytest.mark.parametrize("path", ["/sized", "/streamed"])
+def test_downloads_over_the_size_cap_are_refused(server, tmp_path, monkeypatch, path):
+    monkeypatch.setattr(leaderboard_lit, "MAX_DOWNLOAD_BYTES", 1000)
+    result = fetch_target("http", None, [server + path], tmp_path, None, False)
+    assert result.status == "failed" and "limit" in result.detail
+    assert not any(tmp_path.iterdir())
+
+
+def test_downloads_under_the_size_cap_are_saved(server, tmp_path):
+    result = fetch_target("http", None, [server + "/streamed"], tmp_path, None, False)
+    assert result.status == "ok"
+    assert (tmp_path / "page.pdf").stat().st_size == 5004

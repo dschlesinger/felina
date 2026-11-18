@@ -173,11 +173,12 @@ leaderboard-lit      # fetch every method report / repo linked from the saved le
 `leaderboard-lit` reads the latest snapshot of each leaderboard from `download-leaderboard` (or `--fetch`es new ones)
 and downloads every `Model Report Link` into `results/leaderboard_lit/<space>/<user>/<target>/`. Git repositories
 (GitHub, gists, Hugging Face, tangled, GitLab, Codeberg, Bitbucket, and any other URL that answers `git ls-remote`)
-are shallow-cloned at the linked commit or branch, with files over `--max-mb` (default 5) left out. Google Docs are
+are shallow-cloned at the linked commit or branch, with files over `--max-mb` (default 5) and Git LFS files never
+downloaded. Nothing over 50 MB is fetched: larger pages and files are refused, and a clone is aborted once the repo
+passes 50 MB (both show up as failures). Google Docs are
 exported as text, Drive files downloaded, and every other page saved as `page.html` plus parsed `page.txt` and
 `links.txt`. `index.csv` records each link's status; `FAILURES.md` lists the ones that failed (HTTP 403/404, missing
-repos, timeouts) or came back nearly empty (login walls, JavaScript-only pages). Reruns retry only what failed. The
-clones of all ~150 links take several GB.
+repos, timeouts) or came back nearly empty (login walls, JavaScript-only pages). Reruns retry only what failed.
 
 `train-model` (one run per seed/config of a sweep) and `evaluate-models` give every run its own folder,
 `results/runs/<id>__<train|eval>__<flags>/`, and write everything the run produces into it. The id counts up, and the

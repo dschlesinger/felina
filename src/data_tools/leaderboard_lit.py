@@ -7,7 +7,9 @@ fetches each one into `<RESULTS_FOLDER>/leaderboard_lit/<space>/<user>/<target>/
   * git repositories (GitHub, gists, Hugging Face models/datasets/spaces, tangled, GitLab, Codeberg, Bitbucket, any
     `*.git` URL, and any other URL that answers `git ls-remote`) are shallow-cloned into `repo/`, pinned to the commit
     or branch in the link; the file or folder the link points at is recorded as `path`. Files over `--max-mb` are left
-    out of the checkout and listed in `LARGE_FILES_SKIPPED.txt`.
+    out of the download and listed in `LARGE_FILES_SKIPPED.txt`; Git LFS files are never downloaded.
+  * nothing over 50 MB is downloaded: larger pages and files are refused, and a clone is aborted once the
+    repository on disk passes 50 MB.
   * Google Docs are exported as plain text, Google Drive files are downloaded directly.
   * anything else is downloaded; HTML is saved as `page.html` and parsed into `page.txt` (readable text) and
     `links.txt` (every link on the page), other content types are saved as `page.<ext>`.
@@ -27,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -48,7 +51,7 @@ LINK_COLUMN = "Model Report Link"
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 URL_RE = re.compile(r"https?://[^\s,;<>\"']+")
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) leaderboard-lit"
-MAX_PAGE_BYTES = 50_000_000
+MAX_DOWNLOAD_BYTES = 50_000_000  # hard cap per link: larger pages/files are refused, larger repos aborted
 THIN_CHARS = 200  # parsed pages with less text than this are flagged as `thin`
 GIT_ENV = {
     **os.environ,
@@ -297,6 +300,51 @@ def _checkout_small(repo_dir: Path, max_bytes: int) -> int:
     return len(skipped)
 
 
+def _du(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _fetch_capped(repo_dir: Path, *args: str, timeout: int = 600) -> None:
+    """`git fetch` that is killed as soon as the repository on disk passes MAX_DOWNLOAD_BYTES (covers servers that
+    ignore the blob filter, and repos made of very many small files)."""
+    cmd = ["git", "fetch", *args]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=repo_dir,
+        env=GIT_ENV,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if _du(repo_dir) > MAX_DOWNLOAD_BYTES:
+            proc.kill()
+            proc.wait()
+            raise TooLarge(
+                f"repository passed the {MAX_DOWNLOAD_BYTES / 1e6:.0f} MB limit, clone aborted"
+            )
+        if time.monotonic() > deadline:
+            proc.kill()
+            proc.wait()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        time.sleep(0.5)
+    out, err = proc.communicate()
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    if _du(repo_dir) > MAX_DOWNLOAD_BYTES:  # finished between two checks
+        raise TooLarge(
+            f"repository is over the {MAX_DOWNLOAD_BYTES / 1e6:.0f} MB limit, clone aborted"
+        )
+
+
 def clone(target: GitTarget, dest: Path, max_bytes: int | None) -> str:
     """Shallow-clone target into dest/repo at the linked ref; returns a short description of what was checked out."""
     repo_dir = dest / "repo"
@@ -306,13 +354,13 @@ def clone(target: GitTarget, dest: Path, max_bytes: int | None) -> str:
     filt = ["--filter", f"blob:limit={max_bytes + 1}"] if max_bytes else []
     ref = target.ref
     try:
-        _git(repo_dir, "fetch", "-q", "--depth", "1", *filt, "origin", ref or "HEAD")
+        _fetch_capped(repo_dir, "-q", "--depth", "1", *filt, "origin", ref or "HEAD")
     except subprocess.CalledProcessError:
         if ref is None:
             raise
         # A branch name containing "/" is cut short by the blob/tree link format: fall back to the default branch.
         ref = None
-        _git(repo_dir, "fetch", "-q", "--depth", "1", *filt, "origin", "HEAD")
+        _fetch_capped(repo_dir, "-q", "--depth", "1", *filt, "origin", "HEAD")
     _git(
         repo_dir, "update-ref", "HEAD", "FETCH_HEAD^{commit}"
     )  # ^{commit} peels annotated tags
@@ -420,34 +468,59 @@ def parse_html(html: str, base_url: str) -> tuple[str, str, list[str]]:
     return parser.title.strip(), parser.text(), list(dict.fromkeys(parser.links))
 
 
-def http_get(url: str) -> tuple[bytes, str, str, str, bool]:
-    """(body, media type, charset, attachment filename, truncated) of a GET request."""
+class TooLarge(Exception):
+    """A download or clone went over MAX_DOWNLOAD_BYTES."""
+
+
+def http_get(url: str, out: Path) -> tuple[str, str, str, int]:
+    """Stream a GET into out; returns (media type, charset, attachment filename, bytes).
+
+    Refuses anything over MAX_DOWNLOAD_BYTES: up front when Content-Length says so, otherwise as soon as the stream
+    passes it (the partial file is deleted)."""
     req = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.8"}
     )
     with urllib.request.urlopen(req, timeout=60) as r:
-        body = r.read(MAX_PAGE_BYTES + 1)
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit() and int(length) > MAX_DOWNLOAD_BYTES:
+            raise TooLarge(
+                f"{int(length) / 1e6:.0f} MB, over the {MAX_DOWNLOAD_BYTES / 1e6:.0f} MB limit"
+            )
         media = (r.headers.get_content_type() or "application/octet-stream").lower()
         charset = r.headers.get_content_charset() or ""
         filename = r.headers.get_filename() or ""
-    return body[:MAX_PAGE_BYTES], media, charset, filename, len(body) > MAX_PAGE_BYTES
+        size = 0
+        try:
+            with out.open("wb") as f:
+                while chunk := r.read(1 << 20):
+                    size += len(chunk)
+                    if size > MAX_DOWNLOAD_BYTES:
+                        raise TooLarge(
+                            f"over the {MAX_DOWNLOAD_BYTES / 1e6:.0f} MB limit"
+                        )
+                    f.write(chunk)
+        except BaseException:
+            out.unlink(missing_ok=True)
+            raise
+    return media, charset, filename, size
 
 
 def save_page(url: str, dest: Path) -> tuple[str, str, bool]:
     """Download url into dest; returns (files written, detail, thin)."""
-    body, media, charset, filename, truncated = http_get(url)
     dest.mkdir(parents=True, exist_ok=True)
-    if media in ("text/html", "application/xhtml+xml") or body.lstrip()[
+    part = dest / ".download.part"
+    media, charset, filename, size = http_get(url, part)
+    with part.open("rb") as f:
+        head = f.read(4096)
+    if media in ("text/html", "application/xhtml+xml") or head.lstrip()[
         :15
     ].lower().startswith((b"<!doctype html", b"<html")):
         if not charset:
-            m = re.search(
-                rb"<meta[^>]+charset=[\"']?([\w-]+)", body[:4096], re.IGNORECASE
-            )
+            m = re.search(rb"<meta[^>]+charset=[\"']?([\w-]+)", head, re.IGNORECASE)
             charset = m.group(1).decode() if m else "utf-8"
-        html = body.decode(charset, errors="replace")
+        part.replace(dest / "page.html")
+        html = (dest / "page.html").read_bytes().decode(charset, errors="replace")
         title, text, links = parse_html(html, url)
-        (dest / "page.html").write_bytes(body)
         (dest / "page.txt").write_text(
             (f"# {title}\n\n" if title else "") + text + "\n"
         )
@@ -461,15 +534,13 @@ def save_page(url: str, dest: Path) -> tuple[str, str, bool]:
     ext = (
         EXTENSIONS.get(media)
         or Path(filename).suffix
-        or (".pdf" if body.startswith(b"%PDF") else "")
+        or (".pdf" if head.startswith(b"%PDF") else "")
         or Path(urlparse(url).path).suffix
         or ".bin"
     )[:8]
-    (dest / f"page{ext}").write_bytes(body)
-    detail = f"{filename or media}, {len(body) / 1e3:.0f} kB" + (
-        " (truncated)" if truncated else ""
-    )
-    return f"page{ext}", detail, len(body) < THIN_CHARS
+    part.replace(dest / f"page{ext}")
+    detail = f"{filename or media}, {size / 1e3:.0f} kB"
+    return f"page{ext}", detail, size < THIN_CHARS
 
 
 def google_export(url: str) -> list[str]:
@@ -547,6 +618,7 @@ def fetch_target(
         for child in (
             "repo",
             "LARGE_FILES_SKIPPED.txt",
+            ".download.part",
             *(p.name for p in dest.glob("page*")),
             "links.txt",
         ):
@@ -671,7 +743,7 @@ def main(argv: list[str] | None = None) -> None:
         "--max-mb",
         type=float,
         default=5,
-        help="skip repo files over this size (default 5; 0 = keep all)",
+        help="skip repo files over this size (default 5; 0 = up to the 50 MB cap)",
     )
     parser.add_argument(
         "--no-probe",
@@ -754,7 +826,12 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     out.mkdir(parents=True, exist_ok=True)
-    max_bytes = int(args.max_mb * 1e6) if args.max_mb > 0 else None
+    # Per-file limit for repos; never above the overall cap, which also applies with --max-mb 0.
+    max_bytes = (
+        min(int(args.max_mb * 1e6), MAX_DOWNLOAD_BYTES)
+        if args.max_mb > 0
+        else MAX_DOWNLOAD_BYTES
+    )
 
     def run(item):
         (user, key), (handler, target, urls, group) = item
