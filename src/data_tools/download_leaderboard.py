@@ -94,6 +94,11 @@ def find_leaderboards(base: str) -> list[Leaderboard]:
     return sorted(found, key=lambda lb: int(re.sub(r"\D", "", lb.api_name) or 0))
 
 
+def snapshot_dir(base: str) -> Path:
+    """Default snapshot folder of a Space: `<RESULTS_FOLDER>/leaderboards/<space host>`."""
+    return RESULTS_DIR / "leaderboards" / re.sub(r"^https?://|\.hf\.space$", "", base)
+
+
 def latest_snapshot(out_dir: Path, lb: Leaderboard) -> Path | None:
     """Most recent saved snapshot of this leaderboard (`<stem>__<UTC stamp>.csv`; an un-stamped `<stem>.csv` counts as oldest)."""
     stamped = sorted(out_dir.glob(f"{lb.stem}__*.csv"))
@@ -192,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         raise SystemExit("Not a terminal: pass --all or --select")
 
-    out_dir = args.out or RESULTS_DIR / "leaderboards" / re.sub(r"^https?://|\.hf\.space$", "", base)
+    out_dir = args.out or snapshot_dir(base)
     for lb in chosen:
         try:
             dest, note = download(base, lb, out_dir, args.force)
