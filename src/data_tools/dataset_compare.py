@@ -421,6 +421,7 @@ def compare(
     null_draws: int = _NULL_DRAWS,
     nn_threshold: float = 0.0,
     label_suffix: str = "",
+    cache_dir: Path | None = None,
     seed: int = 0,
 ) -> Comparison:
     """Measure every difference between two tables of molecules. Neither needs labels."""
@@ -443,8 +444,8 @@ def compare(
 
     # Binary, not counts: `tanimoto_nn_distances` is the bit form (intersection over union), so counts would
     # quietly stop being a Tanimoto. Binary is also what Butina clusters on, keeping every reading comparable.
-    fp_left_all = fingerprints(left[smiles_column], counts=False)
-    fp_right_all = fingerprints(right[smiles_column], counts=False)
+    fp_left_all = fingerprints(left[smiles_column], counts=False, cache_dir=cache_dir)
+    fp_right_all = fingerprints(right[smiles_column], counts=False, cache_dir=cache_dir)
     good_left = np.isfinite(fp_left_all).all(axis=1)
     good_right = np.isfinite(fp_right_all).all(axis=1)
     if not good_left.all() or not good_right.all():
@@ -527,8 +528,8 @@ def compare(
     # report describes the same molecules.
     left_rows = np.flatnonzero(good_left)[rows_left]
     right_rows = np.flatnonzero(good_right)[rows_right]
-    X_left, feature_names = named_features(left[smiles_column].gather(left_rows.tolist()))
-    X_right, _ = named_features(right[smiles_column].gather(right_rows.tolist()))
+    X_left, feature_names = named_features(left[smiles_column].gather(left_rows.tolist()), cache_dir)
+    X_right, _ = named_features(right[smiles_column].gather(right_rows.tolist()), cache_dir)
     X = np.vstack([X_left, X_right])
     membership = np.r_[np.zeros(len(X_left), dtype=bool), np.ones(len(X_right), dtype=bool)]
     drivers = feature_shifts(X, feature_names, membership, top=top_features)
@@ -628,6 +629,7 @@ def run(args) -> None:
         null_draws=args.null_draws,
         nn_threshold=args.nn_threshold,
         label_suffix=suffix,
+        cache_dir=args.feature_dir,
         seed=args.seed,
     )
     print("\n".join(comparison.report_lines()))

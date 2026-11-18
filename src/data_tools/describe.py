@@ -118,7 +118,31 @@ def target_columns(df: pl.DataFrame, requested: list[str] | None = None) -> list
     return found
 
 
-def named_features(smiles: pl.Series) -> tuple[np.ndarray, list[str]]:
+def _blocks(smiles: pl.Series, blocks: list, cache_dir: Path | None) -> np.ndarray:
+    """Transform `smiles` through `blocks`, hstacked, via the shared feature cache when one is given.
+
+    Every block here is a registered input, so `inputs.featurize` already caches its rows keyed by SMILES.
+    Going through it means a second run over the same molecules reads them instead of recomputing: RDKit's
+    217 descriptors cost a few milliseconds per molecule, which is seconds per command on a table of
+    thousands, paid again on every invocation.
+
+    `cache_dir=None` computes directly and writes nothing. That is the default because this is a library
+    function, and a test or a one-off on throwaway SMILES should not deposit rows in the project's cache;
+    the CLI passes the real directory.
+    """
+    if cache_dir is None:
+        return np.hstack([block.transform(smiles) for block in blocks])
+
+    from data_tools.inputs import featurize
+
+    # featurize hstacks in the order it is given, which is the order the names were collected in.
+    return featurize(pl.DataFrame({"SMILES": smiles.to_list()}), [b.name for b in blocks], cache_dir)
+
+
+def named_features(
+    smiles: pl.Series,
+    cache_dir: Path | None = None,
+) -> tuple[np.ndarray, list[str]]:
     """Return an (n_molecules, n_features) matrix of interpretable features and their names.
 
     RDKit's 2D descriptors carry the physicochemical axes (size, lipophilicity, polarity, charge-related
@@ -138,19 +162,23 @@ def named_features(smiles: pl.Series) -> tuple[np.ndarray, list[str]]:
         MechanismBasedAlerts(),
         IsoformPreferenceDescriptors(),
     ]
-    matrices, names = [], []
+    names: list[str] = []
     for block in blocks:
-        matrices.append(block.transform(smiles))
         names.extend(block.feature_names)
-    return np.hstack(matrices), names
+    return _blocks(smiles, blocks, cache_dir), names
 
 
-def fingerprints(smiles: pl.Series, *, counts: bool = True) -> np.ndarray:
+def fingerprints(
+    smiles: pl.Series,
+    *,
+    counts: bool = True,
+    cache_dir: Path | None = None,
+) -> np.ndarray:
     """Morgan fingerprints for clustering, distance and the two-sample probe; all-NaN for bad SMILES."""
     from representations.morgan import CountMorganFingerprint, MorganFingerprint
 
     block = CountMorganFingerprint() if counts else MorganFingerprint()
-    return block.transform(smiles)
+    return _blocks(smiles, [block], cache_dir)
 
 
 def usable_columns(X: np.ndarray) -> np.ndarray:

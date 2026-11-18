@@ -137,6 +137,7 @@ def explore(
     top_features: int = 3,
     max_clusters: int = 12,
     label_suffix: str = "",
+    cache_dir: Path | None = None,
     seed: int = 0,
 ) -> Exploration:
     """Cluster `df` and summarize every cluster at or above `min_size`, largest first.
@@ -159,8 +160,8 @@ def explore(
     big = [m for m in ordered if len(m) >= min_size]
     small = [m for m in ordered if len(m) < min_size]
 
-    fp = fingerprints(df[smiles_column])
-    X, feature_names = named_features(df[smiles_column])
+    fp = fingerprints(df[smiles_column], cache_dir=cache_dir)
+    X, feature_names = named_features(df[smiles_column], cache_dir=cache_dir)
     target_names = targets if targets is not None else []
 
     clusters: list[Cluster] = []
@@ -319,6 +320,7 @@ def run(args) -> None:
         top_features=args.top_features,
         max_clusters=args.max_clusters,
         label_suffix=suffix,
+        cache_dir=args.feature_dir,
         seed=args.seed,
     )
     print("\n".join(exploration.report_lines()))

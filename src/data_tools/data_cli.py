@@ -14,7 +14,7 @@ from rich.table import Table
 from data_tools import dataset_alias
 from data_tools.dataset_spec import Source
 from data_tools.datasets import Dataset, registry
-from data_tools.paths import DATA_DIR
+from data_tools.paths import DATA_DIR, FEATURE_DIR
 from models.run_log import clean_interrupt
 
 console = Console()
@@ -207,6 +207,7 @@ def _run(argv: list[str] | None) -> None:
     explore.add_argument("--top-features", type=int, default=3, help="Standout features reported per cluster (default: 3)")
     explore.add_argument("--max-molecules", type=int, default=0, help="Sample this many molecules first; 0 uses all of them")
     explore.add_argument("--smiles-column", default="SMILES", help="Column holding the molecules (default: SMILES)")
+    explore.add_argument("--feature-dir", type=Path, default=FEATURE_DIR, help="Directory holding the shared feature cache (default: FEATURE_FOLDER, else <data>/features)")
     explore.add_argument("--seed", type=int, default=0, help="Seed for sampling (default: 0)")
     explore.add_argument("--out", help="Figure path (default: reports/<dataset>_clusters.png)")
     explore.set_defaults(run=lambda args, _datasets: _explore_cmd(args))
@@ -221,6 +222,7 @@ def _run(argv: list[str] | None) -> None:
     compare.add_argument("--nn-threshold", type=float, default=0.0, help="Tanimoto a nearest-neighbour match must clear to count toward the neighbour image (default: 0.0, count every molecule)")
     compare.add_argument("--null-draws", type=int, default=5, help="Random splits of the left set used to estimate the null probe's centre and spread (default: 5)")
     compare.add_argument("--smiles-column", default="SMILES", help="Column holding the molecules (default: SMILES)")
+    compare.add_argument("--feature-dir", type=Path, default=FEATURE_DIR, help="Directory holding the shared feature cache (default: FEATURE_FOLDER, else <data>/features)")
     compare.add_argument("--seed", type=int, default=0, help="Seed for sampling and cross-validation (default: 0)")
     compare.add_argument("--out", help="Also write the report to this file")
     compare.set_defaults(run=lambda args, _datasets: _compare_cmd(args))
