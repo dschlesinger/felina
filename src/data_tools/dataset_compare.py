@@ -44,6 +44,7 @@ from data_tools.describe import FeatureShift, feature_shifts, named_features, ta
 
 _MAX_PROBE = 3000  # rows sampled per side for the probe, MMD and distance work
 _MIN_PROBE = 5  # the probe stratifies into five folds, so fewer than five a side is no reading at all
+_NULL_DRAWS = 5  # random splits of the left set used to estimate the null's centre and spread
 _DEFAULT_CUTOFF = 0.4
 
 
@@ -83,7 +84,9 @@ class Comparison:
     shared_keys: int
 
     probe_auc: float
-    probe_auc_null: float
+    probe_auc_null: float  # mean over `null_draws` random splits of the left set against itself
+    probe_auc_null_sd: float
+    null_draws: int
     descriptor_auc: float
     probe_drivers: tuple[tuple[str, float], ...]  # (feature, standardized logistic coefficient)
 
@@ -102,8 +105,25 @@ class Comparison:
 
     @property
     def auc_gap(self) -> float:
-        """How much of the probe's separation is real rather than the null's small-sample inflation."""
+        """How far the real probe sits above what the same probe scores with nothing to find."""
         return self.probe_auc - self.probe_auc_null
+
+    @property
+    def auc_gap_sigma(self) -> float:
+        """The gap in units of the null's own spread: how many standard deviations clear of chance it is.
+
+        This is the number that decides whether a gap means anything. A gap of +0.05 is decisive when the
+        null's draws sit within 0.01 of each other and meaningless when they scatter by 0.18, and only this
+        ratio separates those cases.
+        """
+        if not np.isfinite(self.probe_auc_null_sd) or self.probe_auc_null_sd <= 0:
+            return float("nan")
+        return self.auc_gap / self.probe_auc_null_sd
+
+    @property
+    def separable(self) -> bool:
+        """True when the probe beats its own null by more than three of the null's standard deviations."""
+        return np.isfinite(self.auc_gap_sigma) and self.auc_gap_sigma > 3.0
 
     @property
     def shared_pct_left(self) -> float:
@@ -130,8 +150,13 @@ class Comparison:
             return "not measurable: too few molecules, or no feature varies; see the notes"
 
         close = np.isfinite(self.nn_ratio) and self.nn_ratio <= 1.0
-        if self.auc_gap < 0.05:
-            return f"indistinguishable: the probe does no better on the real pair than on {self.left_name} against itself"
+        if not self.separable:
+            # Judged against the null's own spread rather than a fixed margin: a gap that clears 0.05 is
+            # decisive at a thousand molecules a side and ordinary noise at a dozen.
+            return (
+                f"indistinguishable: the probe beats its null by {self.auc_gap:+.3f}, inside the "
+                f"{self.probe_auc_null_sd:.3f} the null's own draws scatter by"
+            )
         if close:
             return (
                 f"separable but close: {self.right_name} is a distinguishable population, yet it sits no "
@@ -155,8 +180,12 @@ class Comparison:
             "",
             "separability",
             f"  probe AUC          {self.probe_auc:.3f}",
-            f"  null AUC           {self.probe_auc_null:.3f}   ({left} split against itself)",
-            f"  gap                {self.auc_gap:+.3f}",
+            f"  null AUC           {self.probe_auc_null:.3f} +/- {self.probe_auc_null_sd:.3f}"
+            f"   ({left} split against itself, {self.null_draws} draws)",
+            f"  gap                {self.auc_gap:+.3f}"
+            + (f"   = {self.auc_gap_sigma:.1f} sd of the null" if np.isfinite(self.auc_gap_sigma) else ""),
+            f"  verdict            {'separable' if self.separable else 'within the null'}"
+            f"   (separable above 3 sd)",
             f"  descriptor AUC     {self.descriptor_auc:.3f}   (named features only)",
         ]
         for name, coefficient in self.probe_drivers:
@@ -282,6 +311,7 @@ def compare(
     top_features: int = 6,
     cutoff: float = _DEFAULT_CUTOFF,
     max_samples: int = _MAX_PROBE,
+    null_draws: int = _NULL_DRAWS,
     label_suffix: str = "",
     seed: int = 0,
 ) -> Comparison:
@@ -321,7 +351,7 @@ def compare(
     sample_left, sample_right = fp_left[rows_left], fp_right[rows_right]
 
     # Headline probe, and the null it has to beat: a random split of the left set against itself.
-    def probe(a: np.ndarray, b: np.ndarray, what: str) -> float:
+    def probe(a: np.ndarray, b: np.ndarray, what: str, is_real: bool = False) -> float:
         """Folded `two_sample_auc`, or NaN and a note when there is too little to cross-validate.
 
         Two guards, both about not turning an artefact into a finding.
@@ -339,20 +369,42 @@ def compare(
             notes.append(f"{what}: needs {_MIN_PROBE} molecules a side, had {min(len(a), len(b))}")
             return float("nan")
         raw = two_sample_auc(a, b, seed)
-        if raw < 0.35:
+        if raw < 0.35 and is_real:
+            # Only meaningful for the real pair. A null draw splits one set into disjoint halves, so a
+            # below-chance draw there is ordinary scatter, and calling it shared molecules would be wrong.
             notes.append(
                 f"{what}: raw AUC {raw:.2f} is below chance, which means molecules appear on both sides; "
                 "folded to its distance from 0.5"
             )
         return 0.5 + abs(raw - 0.5)
 
-    probe_auc = probe(sample_left, sample_right, "probe AUC")
-    half = rng.permutation(len(sample_left))
-    cut = len(half) // 2
-    probe_null = probe(sample_left[half[:cut]], sample_left[half[cut:]], "null AUC")
+    probe_auc = probe(sample_left, sample_right, "probe AUC", is_real=True)
+
+    # The null is a distribution, not a number. One draw gives a reference point with no scale attached, and
+    # the draws' spread is exactly what says whether a gap is decisive: it runs from about 0.02 at a
+    # thousand molecules a side to 0.18 at a dozen. Folding also means the expected null is not 0.5 but
+    # 0.5 plus the mean absolute deviation of the draws, which is only knowable by taking several.
+    nulls = []
+    for draw in range(max(1, null_draws)):
+        half = np.random.default_rng([seed, draw]).permutation(len(sample_left))
+        cut = len(half) // 2
+        value = probe(sample_left[half[:cut]], sample_left[half[cut:]], "null AUC")
+        if not np.isfinite(value):
+            break  # too small to cross-validate; `probe` has already left the note saying so
+        nulls.append(value)
+    probe_null = float(np.mean(nulls)) if nulls else float("nan")
+    probe_null_sd = float(np.std(nulls, ddof=1)) if len(nulls) > 1 else float("nan")
 
     shift, d_right = fingerprint_shift(sample_left, sample_right)
     nn_similarity = float(np.median(1.0 - d_right)) if len(d_right) else float("nan")
+    if not np.isfinite(shift["nn_ratio"]):
+        # `shift_stats` returns NaN when the left set's median self-distance is zero, which means over half
+        # its molecules have an exact fingerprint twin inside it. There is then no "how far left sits from
+        # itself" to measure the right set against.
+        notes.append(
+            f"over half of {left_name} has a fingerprint twin inside {left_name}, so nn_ratio has no "
+            "reference distance; deduplicate it to get one"
+        )
 
     # `standardize` drops every column that is constant across the left set. A congeneric enough left set
     # leaves nothing behind, and the distance machinery cannot run on a zero-width matrix.
@@ -408,6 +460,8 @@ def compare(
         shared_keys=len(left_keys & right_keys),
         probe_auc=probe_auc,
         probe_auc_null=probe_null,
+        probe_auc_null_sd=probe_null_sd,
+        null_draws=len(nulls),
         descriptor_auc=descriptor_auc,
         probe_drivers=probe_drivers,
         nn_similarity_median=nn_similarity,
@@ -424,7 +478,9 @@ def compare(
             cutoff,
         ),
         label_suffix=label_suffix,
-        notes=tuple(notes),
+        # Deduplicated, order kept: the null runs the probe several times, so a size complaint that applies
+        # to one draw applies to all of them and would otherwise be printed once per draw.
+        notes=tuple(dict.fromkeys(notes)),
     )
 
 
@@ -459,6 +515,7 @@ def run(args) -> None:
         top_features=args.top_features,
         cutoff=args.cutoff,
         max_samples=args.max_samples,
+        null_draws=args.null_draws,
         label_suffix=suffix,
         seed=args.seed,
     )

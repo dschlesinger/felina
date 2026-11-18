@@ -44,6 +44,36 @@ _AMINES = [
 ]
 
 
+def _many_chains() -> list[str]:
+    """~50 aliphatics with distinct fingerprints.
+
+    Length alone is not enough to vary: every radius-2 environment in CCCCCCO also occurs in CCCCCCCCO, so
+    a homologous series has one fingerprint repeated and no bit to separate anything on. The branch has to
+    move along the chain for the environments themselves to differ.
+    """
+    tails = ["O", "N", "S", "C(=O)O", "C(=O)OC", "Br", "C#N"]
+    out = []
+    for tail in tails:
+        for position in range(1, 7):
+            body = "C" * position + "(C)" + "C" * (7 - position)
+            out.append(f"C{body}{tail}")
+    out += [f"OC{'C' * n}(C)CO" for n in (2, 3, 4, 5)]
+    return sorted(set(out))
+
+
+def _many_amines() -> list[str]:
+    """~50 distinct aromatic amines: one scaffold family, varied substituent and linker."""
+    subs = ["", "C", "CC", "F", "Cl", "Br", "OC", "C#N", "C(F)(F)F"]
+    linkers = ["CC", "CCC", "CCCC"]
+    heads = ["CN(C)", "CCN(C)", "CN(CC)"]
+    out = []
+    for head in heads:
+        for linker in linkers:
+            for sub in subs[:6]:
+                out.append(f"{head}{linker}c1ccc2ccccc2c1{sub}")
+    return sorted(set(out))
+
+
 def _frame(smiles: list[str], label: float | None = None) -> pl.DataFrame:
     data: dict[str, list] = {"SMILES": smiles}
     if label is not None:
@@ -66,12 +96,30 @@ def test_probe_null_is_near_chance_when_a_set_is_split_against_itself():
 
 
 def test_disjoint_chemotypes_separate_far_above_the_null():
-    result = compare(_frame(_CHAINS), _frame(_AMINES), left_name="chains", right_name="amines")
+    """At a realistic sample size, two unrelated chemotypes must clear the null decisively."""
+    result = compare(_frame(_many_chains()), _frame(_many_amines()), left_name="chains", right_name="amines")
 
     assert result.probe_auc > 0.9
-    assert result.auc_gap > 0.2
+    assert result.auc_gap_sigma > 3.0
+    assert result.separable
     assert result.nn_ratio > 1.0  # and they really are far apart, not merely distinguishable
     assert "strongly shifted" in result.verdict()
+
+
+def test_a_dozen_molecules_cannot_establish_separability_even_at_a_perfect_auc():
+    """The reading the null exists to prevent.
+
+    Twelve molecules a side separate perfectly -- AUC 1.0 -- while random halves of the left set alone
+    score 0.66 and scatter by 0.17. One in twenty such splits would look near-perfect by chance, so a
+    perfect score here is two standard deviations of noise, not evidence, and the verdict must say so.
+    """
+    result = compare(_frame(_CHAINS), _frame(_AMINES))
+
+    assert result.probe_auc > 0.9  # perfectly separated...
+    assert result.probe_auc_null_sd > 0.1  # ...but the null scatters nearly as far
+    assert result.auc_gap_sigma < 3.0
+    assert not result.separable
+    assert "indistinguishable" in result.verdict()
 
 
 def test_a_separable_but_nearby_set_is_not_called_strongly_shifted():
