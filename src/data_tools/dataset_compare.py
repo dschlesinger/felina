@@ -3,8 +3,9 @@
 The question behind every use of this is the same: *if I train on A, what happens on B?* Six readings answer
 it from different directions, and they are reported together because any one of them alone misleads.
 
-  overlap        shared molecules on the InChIKey connectivity block. A non-zero overlap with a blind set is
-                 leakage; a non-zero overlap between train and an external source is duplication.
+  overlap        shared molecules on the InChIKey connectivity block (skeletons, stereo ignored) and on the
+                 connectivity + stereo blocks (exact matches; protonation ignored). A non-zero overlap with a blind set is leakage; a non-zero
+                 overlap between train and an external source is duplication.
 
   probe AUC      cross-validated AUROC of a classifier told to separate A from B on fingerprints. 0.5 means
                  the two are indistinguishable; 1.0 means a model can always tell which set a molecule came
@@ -123,6 +124,9 @@ class Comparison:
     left_keys: int
     right_keys: int
     shared_keys: int
+    left_exact: int  # distinct connectivity+stereo InChIKey blocks: stereoisomers count separately
+    right_exact: int
+    shared_exact: int
 
     probe_auc: float
     probe_auc_null: float  # mean over `null_draws` random splits of the left set against itself
@@ -178,6 +182,14 @@ class Comparison:
     def shared_pct_right(self) -> float:
         return 100.0 * self.shared_keys / self.right_keys if self.right_keys else 0.0
 
+    @property
+    def exact_pct_left(self) -> float:
+        return 100.0 * self.shared_exact / self.left_exact if self.left_exact else 0.0
+
+    @property
+    def exact_pct_right(self) -> float:
+        return 100.0 * self.shared_exact / self.right_exact if self.right_exact else 0.0
+
     def verdict(self) -> str:
         """One line naming what the numbers add up to, read across both axes rather than one.
 
@@ -222,6 +234,8 @@ class Comparison:
             "overlap",
             f"  {self.shared_keys} shared skeletons "
             f"({self.shared_pct_left:.2f}% of {left}, {self.shared_pct_right:.2f}% of {right})",
+            f"  {self.shared_exact} exact matches, stereo included "
+            f"({self.exact_pct_left:.2f}% of {left}, {self.exact_pct_right:.2f}% of {right})",
             "",
             "separability",
             f"  probe AUC          {self.probe_auc:.3f}",
@@ -320,11 +334,18 @@ def neighbour_image(
     )
 
 
-def _keys(df: pl.DataFrame, smiles_column: str) -> set[str]:
-    """Connectivity-block InChIKeys of a table's molecules."""
-    from data_tools.standardize import connectivity_keys
+def _keys(df: pl.DataFrame, smiles_column: str) -> tuple[set[str], set[str]]:
+    """A table's molecules as (connectivity-block InChIKeys, full InChIKeys).
 
-    return {k for k in connectivity_keys(df[smiles_column].to_list()) if k}
+    The "full" key here is the first two InChIKey blocks: connectivity plus stereo and isotopes. That separates
+    stereoisomers, which the connectivity block merges, while the protonation flag (third block) is dropped,
+    so a carboxylate salt still matches its free acid. The skeleton set is cut from the same keys so each
+    SMILES is parsed once.
+    """
+    from data_tools.standardize import stereo_keys
+
+    exact = {k.rsplit("-", 1)[0] for k in stereo_keys(df[smiles_column].to_list()) if k}
+    return {k.split("-")[0] for k in exact}, exact
 
 
 def _scaffolds(smiles: list[str]) -> set[str]:
@@ -440,7 +461,7 @@ def compare(
     notes: list[str] = []
 
     left_smiles, right_smiles = left[smiles_column].to_list(), right[smiles_column].to_list()
-    left_keys, right_keys = _keys(left, smiles_column), _keys(right, smiles_column)
+    (left_keys, left_exact), (right_keys, right_exact) = _keys(left, smiles_column), _keys(right, smiles_column)
 
     # Binary, not counts: `tanimoto_nn_distances` is the bit form (intersection over union), so counts would
     # quietly stop being a Tanimoto. Binary is also what Butina clusters on, keeping every reading comparable.
@@ -567,6 +588,9 @@ def compare(
         left_keys=len(left_keys),
         right_keys=len(right_keys),
         shared_keys=len(left_keys & right_keys),
+        left_exact=len(left_exact),
+        right_exact=len(right_exact),
+        shared_exact=len(left_exact & right_exact),
         probe_auc=probe_auc,
         probe_auc_null=probe_null,
         probe_auc_null_sd=probe_null_sd,

@@ -114,7 +114,8 @@ much closer to the congeneric-series structure the set was built with.
 `data compare` reports seven readings, because any one alone misleads:
 
 ```text
-overlap            shared InChIKey connectivity blocks — leakage against a blind set, duplication otherwise
+overlap            shared InChIKey connectivity blocks (skeletons) and connectivity + stereo blocks (exact
+                   matches) — leakage against a blind set, duplication otherwise
 separability       a cross-validated probe AUC, the null it has to beat, and the gap in units of the
                    null's own spread
 distance           median nearest-neighbour Tanimoto, nn_ratio, frac_out, and an MMD permutation test
@@ -131,6 +132,7 @@ train (4905 rows, 4901 skeletons) vs test (750 rows, 748 skeletons)
 
 overlap
   0 shared skeletons (0.00% of train, 0.00% of test)
+  0 exact matches, stereo included (0.00% of train, 0.00% of test)
 
 separability
   probe AUC          0.800

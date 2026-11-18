@@ -196,6 +196,18 @@ def test_overlap_counts_salt_and_stereo_variants_as_the_same_skeleton():
     assert result.shared_pct_right == pytest.approx(50.0)
 
 
+def test_exact_overlap_separates_stereoisomers_but_strips_salts():
+    """The full InChIKey keeps stereo, so enantiomers share a skeleton but are not an exact match."""
+    left = _frame(["CC(=O)Oc1ccccc1C(=O)O", "C[C@@H](N)Cc1ccccc1"])
+    right = _frame(["CC(=O)Oc1ccccc1C(=O)[O-].[Na+]", "C[C@H](N)Cc1ccccc1"])
+
+    result = compare(left, right)
+    assert result.shared_keys == 2
+    assert result.shared_exact == 1  # the salt strips to aspirin; the enantiomers stay apart
+    assert result.exact_pct_right == pytest.approx(50.0)
+    assert any("1 exact matches" in line for line in result.report_lines())
+
+
 def test_a_contained_set_is_called_out_as_not_independent():
     result = compare(_frame(_CHAINS + _AMINES), _frame(_AMINES))
     assert "not an independent set" in result.verdict()
