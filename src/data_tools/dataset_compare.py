@@ -49,6 +49,47 @@ _DEFAULT_CUTOFF = 0.4
 
 
 @dataclass(frozen=True)
+class NeighbourImage:
+    """How few molecules of one set account for being the whole other set's nearest neighbour.
+
+    Point every molecule of the source set at its closest molecule in the target set and count the distinct
+    molecules hit. That count is the target set's *effective* size as far as the source is concerned, and it
+    is the reading that exposes an analog expansion: 750 molecules landing on 75 distinct parents means the
+    source is ten analogs per parent, not 750 independent draws, however large its row count looks.
+
+    `fan_max` guards the interpretation. A small image with an even fan-in is a congeneric expansion; the
+    same image size with one molecule absorbing most of the source is a single promiscuous match plus noise.
+    """
+
+    source_n: int
+    target_n: int
+    image_n: int  # distinct target molecules that are someone's nearest neighbour
+    fan_mean: float  # source molecules per image molecule
+    fan_median: float
+    fan_max: int
+    median_similarity: float
+    min_similarity: float  # the threshold source molecules had to clear to count
+    dropped: int  # source molecules whose best match fell below it
+
+    @property
+    def image_pct(self) -> float:
+        return 100.0 * self.image_n / self.target_n if self.target_n else float("nan")
+
+    def describe(self, source: str, target: str) -> list[str]:
+        head = (
+            f"{source} -> {target}   {self.source_n - self.dropped} molecules point at "
+            f"{self.image_n} distinct ({self.image_pct:.1f}% of {target})"
+        )
+        tail = (
+            f"fan-in median {self.fan_median:.0f}, mean {self.fan_mean:.1f}, max {self.fan_max}; "
+            f"median Tanimoto {self.median_similarity:.3f}"
+        )
+        if self.dropped:
+            tail += f"; {self.dropped} below Tanimoto {self.min_similarity:g}"
+        return [f"  {head}", f"      {tail}"]
+
+
+@dataclass(frozen=True)
 class LabelShift:
     """One target's distribution on each side, with a distribution test."""
 
@@ -97,6 +138,10 @@ class Comparison:
     mmd_p: float
 
     feature_drivers: tuple[FeatureShift, ...]
+    # Computed on the full sets, not the probe's samples: subsampling either side would shrink the image
+    # count for reasons that have nothing to do with the chemistry.
+    image_right_in_left: NeighbourImage | None = None
+    image_left_in_right: NeighbourImage | None = None
     label_shifts: tuple[LabelShift, ...] = ()
     scaffold_coverage: float = float("nan")
     cluster_coverage: float = float("nan")
@@ -198,6 +243,15 @@ class Comparison:
             f"  frac_out           {self.frac_out:.3f}   (0.05 = same distribution)",
             f"  MMD                {self.mmd:.4f}  p={self.mmd_p:.3f}",
             "",
+            "nearest-neighbour image",
+        ]
+        for image, source, target in (
+            (self.image_right_in_left, right, left),
+            (self.image_left_in_right, left, right),
+        ):
+            lines += image.describe(source, target) if image is not None else ["  not computed"]
+        lines += [
+            "",
             "coverage",
             f"  scaffolds of {right} present in {left}: {100 * self.scaffold_coverage:.1f}%",
             f"  clusters of {right} containing a {left} molecule: {100 * self.cluster_coverage:.1f}%",
@@ -211,6 +265,59 @@ class Comparison:
         lines += ["", f"verdict: {self.verdict()}"]
         lines += [f"note: {n}" for n in self.notes]
         return lines
+
+
+def _nearest(source: np.ndarray, target: np.ndarray, chunk: int = 1024) -> tuple[np.ndarray, np.ndarray]:
+    """(index of each source row's nearest target row, that pair's Tanimoto similarity).
+
+    Binary fingerprints only: for 0/1 vectors the intersection is the dot product and the union is the
+    popcount sum minus it, which turns the whole thing into one matrix multiply per chunk. Chunking is over
+    the source so the similarity matrix never has to exist whole.
+    """
+    target = target.astype(np.float32)
+    target_bits = target.sum(axis=1)
+    index = np.empty(len(source), dtype=np.int64)
+    similarity = np.empty(len(source), dtype=np.float32)
+    for start in range(0, len(source), chunk):
+        block = source[start : start + chunk].astype(np.float32)
+        inter = block @ target.T
+        union = block.sum(axis=1)[:, None] + target_bits[None, :] - inter
+        sim = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+        best = np.argmax(sim, axis=1)
+        index[start : start + len(block)] = best
+        similarity[start : start + len(block)] = sim[np.arange(len(block)), best]
+    return index, similarity
+
+
+def neighbour_image(
+    source: np.ndarray,
+    target: np.ndarray,
+    *,
+    min_similarity: float = 0.0,
+) -> NeighbourImage:
+    """Count the distinct target molecules that are nearest neighbour to something in the source set."""
+    if len(source) == 0 or len(target) == 0:
+        return NeighbourImage(len(source), len(target), 0, float("nan"), float("nan"), 0,
+                              float("nan"), min_similarity, 0)
+    index, similarity = _nearest(source, target)
+    keep = similarity >= min_similarity
+    kept = index[keep]
+    if kept.size == 0:
+        return NeighbourImage(len(source), len(target), 0, float("nan"), float("nan"), 0,
+                              float("nan"), min_similarity, int((~keep).sum()))
+    counts = np.bincount(kept)
+    fan = counts[counts > 0]
+    return NeighbourImage(
+        source_n=len(source),
+        target_n=len(target),
+        image_n=int(len(fan)),
+        fan_mean=float(fan.mean()),
+        fan_median=float(np.median(fan)),
+        fan_max=int(fan.max()),
+        median_similarity=float(np.median(similarity[keep])),
+        min_similarity=min_similarity,
+        dropped=int((~keep).sum()),
+    )
 
 
 def _keys(df: pl.DataFrame, smiles_column: str) -> set[str]:
@@ -312,6 +419,7 @@ def compare(
     cutoff: float = _DEFAULT_CUTOFF,
     max_samples: int = _MAX_PROBE,
     null_draws: int = _NULL_DRAWS,
+    nn_threshold: float = 0.0,
     label_suffix: str = "",
     seed: int = 0,
 ) -> Comparison:
@@ -470,6 +578,8 @@ def compare(
         mmd=mmd,
         mmd_p=mmd_p,
         feature_drivers=tuple(drivers),
+        image_right_in_left=neighbour_image(fp_right, fp_left, min_similarity=nn_threshold),
+        image_left_in_right=neighbour_image(fp_left, fp_right, min_similarity=nn_threshold),
         label_shifts=tuple(label_shifts),
         scaffold_coverage=scaffold_coverage,
         cluster_coverage=_cluster_coverage(
@@ -516,6 +626,7 @@ def run(args) -> None:
         cutoff=args.cutoff,
         max_samples=args.max_samples,
         null_draws=args.null_draws,
+        nn_threshold=args.nn_threshold,
         label_suffix=suffix,
         seed=args.seed,
     )

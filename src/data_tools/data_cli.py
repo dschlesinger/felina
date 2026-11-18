@@ -218,6 +218,7 @@ def _run(argv: list[str] | None) -> None:
     compare.add_argument("--cutoff", type=float, default=0.4, help="Butina distance cutoff for cluster coverage (default: 0.4)")
     compare.add_argument("--top-features", type=int, default=6, help="Separating features to report (default: 6)")
     compare.add_argument("--max-samples", type=int, default=3000, help="Molecules sampled per side for the probe and distance work (default: 3000)")
+    compare.add_argument("--nn-threshold", type=float, default=0.0, help="Tanimoto a nearest-neighbour match must clear to count toward the neighbour image (default: 0.0, count every molecule)")
     compare.add_argument("--null-draws", type=int, default=5, help="Random splits of the left set used to estimate the null probe's centre and spread (default: 5)")
     compare.add_argument("--smiles-column", default="SMILES", help="Column holding the molecules (default: SMILES)")
     compare.add_argument("--seed", type=int, default=0, help="Seed for sampling and cross-validation (default: 0)")

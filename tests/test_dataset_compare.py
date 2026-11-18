@@ -74,6 +74,28 @@ def _many_amines() -> list[str]:
     return sorted(set(out))
 
 
+# Six mutually unrelated scaffolds, each with a substituent slot. Mutual distinctness is the point: when
+# parents resemble each other, an analog's nearest neighbour is legitimately somebody else's parent, and the
+# image collapses below the number of series for a real reason rather than a bug.
+_SERIES = (
+    "CN(C)CCc1ccc2ccccc2c1{}",
+    "O=C(Nc1ccccc1{})c1ccccc1",
+    "O=S(=O)(Nc1ccccc1{})c1cccs1",
+    "N#CCNC(=O)c1csc(-c2ccc3OCOc3c2{})n1",
+    "COc1ccc(-c2noc(CCC(=O)N3CCCCC3)n2)cc1{}",
+    "O=C(NCCc1nc(-c2ccccc2{})no1)c1ccccc1",
+)
+_SERIES_SUBS = ("C", "CC", "F", "Cl")
+
+
+def _parents() -> list[str]:
+    return [template.format("") for template in _SERIES]
+
+
+def _analogs() -> list[str]:
+    return [template.format(sub) for template in _SERIES for sub in _SERIES_SUBS]
+
+
 def _frame(smiles: list[str], label: float | None = None) -> pl.DataFrame:
     data: dict[str, list] = {"SMILES": smiles}
     if label is not None:
@@ -264,6 +286,59 @@ def test_degenerate_input_reports_nothing_rather_than_crashing():
 
     assert np.isnan(result.mmd)
     assert any("constant" in note for note in result.notes)
+
+
+def test_neighbour_image_counts_the_parents_an_expansion_collapses_onto():
+    """The reading that exposes an analog expansion.
+
+    Six parents, each with four analogs. The 24 analogs are 24 rows, but as far as the parent set is
+    concerned they are six molecules wearing different substituents, and the image count must say six
+    rather than flattering the expansion with its row count.
+    """
+    result = compare(_frame(_parents()), _frame(_analogs()), left_name="parents", right_name="analogs")
+
+    image = result.image_right_in_left
+    assert image.source_n == 24
+    assert image.image_n == 6  # six parents account for all 24
+    assert image.fan_mean == pytest.approx(4.0)
+    assert image.fan_max == 4  # evenly spread: a congeneric expansion, not one promiscuous match
+
+
+def test_neighbour_image_of_unrelated_sets_is_not_concentrated():
+    """Disjoint chemotypes have no parent structure, so the image should not collapse to a few molecules."""
+    result = compare(_frame(_many_chains()), _frame(_many_amines()))
+
+    image = result.image_right_in_left
+    assert image.image_n > 1
+    assert image.median_similarity < 0.3  # and nothing it points at is actually a near neighbour
+
+
+def test_neighbour_image_threshold_drops_distant_matches():
+    """Every molecule has a nearest neighbour; only some have a *close* one."""
+    loose = compare(_frame(_many_chains()), _frame(_many_amines()))
+    strict = compare(_frame(_many_chains()), _frame(_many_amines()), nn_threshold=0.5)
+
+    assert loose.image_right_in_left.dropped == 0
+    assert strict.image_right_in_left.dropped == strict.image_right_in_left.source_n
+    assert strict.image_right_in_left.image_n == 0
+
+
+def test_neighbour_image_is_computed_on_full_sets_not_the_probe_sample():
+    """Sampling would shrink the image for reasons unrelated to chemistry."""
+    result = compare(_frame(_parents()), _frame(_analogs()), max_samples=5)
+
+    assert result.image_right_in_left.source_n == 24  # all of them, despite max_samples=5
+    assert result.image_left_in_right.source_n == 6
+
+
+def test_report_shows_both_directions_of_the_neighbour_image():
+    result = compare(_frame(_CHAINS), _frame(_AMINES), left_name="chains", right_name="amines")
+    text = "\n".join(result.report_lines())
+
+    assert "nearest-neighbour image" in text
+    assert "amines -> chains" in text
+    assert "chains -> amines" in text
+    assert "fan-in" in text
 
 
 def test_cluster_coverage_is_zero_for_chemically_disjoint_sets():
