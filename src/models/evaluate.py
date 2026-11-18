@@ -23,6 +23,7 @@ from rich.markup import escape
 from rich.table import Table
 from tqdm import tqdm
 
+from data_tools import standardization
 from data_tools.datasets import challenge
 from data_tools.inputs import INPUT_REGISTRY, featurize, is_known_input
 from data_tools.load import cv_folds, load_data
@@ -1014,6 +1015,7 @@ def main() -> None:
         "every input set under each of them, with 'none' for the unreduced features, e.g. --dimred pca[20] pls[8] none",
     )
     parser.add_argument("--cache-dir", default=FEATURE_DIR, help="Directory for cached feature matrices")
+    standardization.add_argument(parser)
     parser.add_argument("--sort-by", default="MAE", choices=_METRICS, help="Metric to sort results by")
     parser.add_argument(
         "--predictions-out", type=Path, nargs="?", const=IN_RUN_DIR,
@@ -1056,6 +1058,7 @@ def main() -> None:
     )
     parser.add_argument("--plots-dir", type=Path, default=None, help="Directory for --plots output (default: plots/ in the run folder)")
     args = parser.parse_args()
+    standardization.set_mode(args.standardization)
     with clean_interrupt("evaluate-models"), run_log("eval", changed_flags(args, parser, skip=_UNNAMED_FLAGS)) as log:
         # Everything this run writes lands in its own folder unless a flag names somewhere else.
         args.predictions_out = _resolve_out(args.predictions_out, log.dir, "predictions.csv")

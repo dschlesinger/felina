@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
 
+from data_tools import standardization
 from data_tools.merge_datasets import merge, scored_source
 from data_tools.overlap import add_keys
 from data_tools.paths import DATA_DIR
@@ -46,6 +47,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "(see data_tools.split_column), which scores about 0.013 lower and is not comparable to it.",
     )
     parser.add_argument("--split-seed", type=int, default=0, help="Seed for the merged table's split (default: 0)")
+    standardization.add_argument(parser)
     parser.add_argument(
         "--target-columns",
         nargs="+",
@@ -62,9 +64,17 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
 def merge_stage(specs: dict[str, list[str] | None], args: argparse.Namespace):
     """Merge the challenge with the given sources on the pinned split.
 
-    Returns (table, heads, scored, tasks) exactly as data_tools.merge_datasets.merge.
+    Returns (table, heads, scored, tasks) exactly as data_tools.merge_datasets.merge,
+    with the SMILES column standardized: the graph backends read SMILES straight
+    off this table, so this is where their featurization input is normalized, as
+    `featurize` is for the cached representations.
+
+    The split and the identity keys are computed inside `merge` on the SMILES as
+    written. That is deliberate: the InChIKey blocks those keys use are already
+    invariant to the salt form, charge state and spelling that standardization
+    changes, so normalizing first would move no molecule between splits.
     """
-    return merge(
+    table, heads, scored, tasks = merge(
         # The scored dataset's source is always loaded for the pinned split and scoring; its labels train
         # only if listed.
         {scored_source(): None, **specs},
@@ -72,6 +82,16 @@ def merge_stage(specs: dict[str, list[str] | None], args: argparse.Namespace):
         split_strategy=args.split_strategy,
         split_seed=args.split_seed,
     )
+    mode = getattr(args, "standardization", None)
+    raw = table["SMILES"].to_list()
+    table = standardization.standardize_column(table, "SMILES", mode)
+    rewritten = standardization.changed(raw, table["SMILES"].to_list())
+    if rewritten:
+        print(
+            f"  standardization={standardization.resolve(mode)}: {rewritten}/{len(raw)} SMILES rewritten",
+            file=sys.stderr,
+        )
+    return table, heads, scored, tasks
 
 
 def prepare_joint_split(

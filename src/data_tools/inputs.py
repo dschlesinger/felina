@@ -36,6 +36,8 @@ from representations.monroe import parse_spec as parse_monroe_spec
 from representations.cyp_mech import CYPMechanisticBlock
 from representations.cyp_xtb import XTBElectronic, XTBSolvation
 from data_tools.paths import FEATURE_DIR
+from data_tools.standardization import changed as _changed
+from data_tools.standardization import get_mode, standardize_many
 
 _rdkit = RDKitDescriptors()
 _chemeleon = CheMeleon()
@@ -209,18 +211,30 @@ def is_known_input(name: str) -> bool:
     )
 
 
-def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.ndarray:
+def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path, standardization: str | None = None) -> np.ndarray:
     """Return features for df, computing only molecules not already in the cache.
 
-    Cache is content-addressed by SMILES, not by split/seed — a molecule's
-    representation doesn't depend on how the data was split, so the same
-    cache is reused across every split type and seed.
+    SMILES are standardized first (data_tools.standardization), so every dataset
+    reaching a featurizer is spelled the same way and the same molecule cannot
+    occupy two cache rows under two spellings.
+
+    Cache is content-addressed by the standardized SMILES, not by split/seed — a
+    molecule's representation doesn't depend on how the data was split, so the
+    same cache is reused across every split type and seed. It is not keyed by
+    mode either: a mode that rewrites a molecule simply asks for a different
+    string, which is a different cache row, so modes cannot read each other's
+    features.
 
     Cache layout (one pair of files per representation):
       {input_name}.npy  — float64 array of shape (N_cached, D); grows as new molecules arrive
-      {input_name}.idx  — text file, one SMILES per line; line i = row i of .npy
+      {input_name}.idx  — text file, one standardized SMILES per line; line i = row i of .npy
     """
-    smiles_req = df["SMILES"].to_list()
+    raw_smiles = df["SMILES"].to_list()
+    smiles_req = standardize_many(raw_smiles, standardization)
+    rewritten = _changed(raw_smiles, smiles_req)
+    if rewritten:
+        mode = standardization or get_mode()
+        print(f"[{input_name}] standardization={mode}: {rewritten}/{len(smiles_req)} SMILES rewritten")
     cache_dir.mkdir(parents=True, exist_ok=True)
     weights = parse_spec(input_name)
     unimol_weights = parse_unimol_spec(input_name)
@@ -283,15 +297,20 @@ def featurize(
     df: pl.DataFrame,
     input_names: str | list[str],
     cache_dir: Path = FEATURE_DIR,
+    standardization: str | None = None,
 ) -> np.ndarray:
     """Return feature matrix for df, computing only uncached molecules.
 
     Pass a single name or a list; multiple inputs are hstacked after loading
     each from its own cache file.
+
+    `standardization` names the mode applied to the SMILES before featurizing
+    (`none`, `normal`, `advanced`); the process-wide mode set by
+    `--standardization` is used when it is None.
     """
     names = [input_names] if isinstance(input_names, str) else input_names
     unknown = [n for n in names if not is_known_input(n)]
     if unknown:
         raise ValueError(f"Unknown input(s): {unknown}. Available: {list(INPUT_REGISTRY.keys())} or chemprop[/path/to/weights], unimol[/path/to/model_0.pth], atom_jepa[/path/encoder.pt] or monroe[/path/to/checkpoint]")
-    arrays = [_featurize_one(df, name, cache_dir) for name in names]
+    arrays = [_featurize_one(df, name, cache_dir, standardization) for name in names]
     return arrays[0] if len(arrays) == 1 else np.hstack(arrays)

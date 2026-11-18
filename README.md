@@ -258,6 +258,62 @@ joined, and every overlap measurement keyed, on the **InChIKey connectivity bloc
 isotope labelling. The in-house sources (same molecules) are collapsed on the full
 InChIKey so stereoisomers stay distinct. See `data_tools.standardize`.
 
+### Standardization before featurization
+
+Identity keys decide which rows are the same molecule; they do not change the
+string a featurizer sees. That is `data_tools.standardization`, and every
+dataset passes through it before it is featurized — the cached representations
+(`data_tools.inputs.featurize`) and the merged table the graph backends read
+SMILES off (`models.training.common.merge_stage`) alike. Without it the same
+molecule spelled two ways in train and blind gets two cache rows and two
+different feature vectors.
+
+`--standardization` picks the mode on `evaluate-models`, `train-model`,
+`representations` and `foundation-model`:
+
+| Mode | What it does |
+| --- | --- |
+| `none` | The SMILES reaches the featurizer exactly as written. |
+| `normal` (default) | Largest fragment by string length, then RDKit canonical SMILES. What the project has always done, so it is the behaviour every recorded result was produced under. |
+| `advanced` | `rdMolStandardize` Cleanup → FragmentParent → Uncharger, then canonical SMILES: normalizes functional groups, takes the parent by molecular weight, neutralizes charges. |
+| `tautomer` | `advanced` plus `TautomerEnumerator.Canonicalize`, so a tautomer family collapses to one representative. Slowest. |
+
+The modes differ on salts and charge states. `CCO.[Na+]` standardizes to
+`[Na+]` under `normal`, because the longest *string* component wins, and to
+`CCO` under `advanced`, which picks by weight. `CC(=O)[O-]` keeps its charge
+under `normal` and becomes `CC(=O)O` under `advanced`. `Oc1ccccn1` and
+`O=c1cccc[nH]1` stay apart under `advanced` and both become `O=c1cccc[nH]1`
+under `tautomer`.
+
+`tautomer` sets `SetRemoveSp3Stereo(False)` and `SetRemoveBondStereo(False)`,
+against RDKit's defaults, which otherwise strip stereo wherever a transform
+*could* reach it — enough to flatten methotrexate's alpha carbon and
+diethylstilbestrol's double bond. Four molecules in train+test still lose
+stereo because a transform genuinely moves that centre: two mifepristone-type
+steroids whose enone tautomerizes across the ring fusion, a rapamycin-type
+macrolide whose ketone enolizes, and vitamin K, which aromatizes to the
+hydroquinone. RDKit's scoring function likes aromatic rings, and that is where
+its canonical tautomer is least chemically convincing.
+
+Measured on train+test (5,655 molecules): `tautomer` takes about 40 s against
+7 s for `advanced`, rewrites 363 of them relative to `advanced`, and merges
+**no** two molecules in the set — every one already had a distinct canonical
+tautomer. On a 4,000-row sample of the PubChem AID1851 auxiliary data it raised
+exact string matches to the challenge from 21 to 22. So its value here is
+representational consistency, not deduplication: the identity keys already run
+through InChI, whose mobile-H layer merges most tautomers before the join. Treat
+it as something to A/B, not an obvious win.
+
+The feature cache is content-addressed by the standardized SMILES, so switching
+mode recomputes rather than reusing: a mode that rewrites a molecule asks for a
+different string, which is a different cache row. Nothing has to be invalidated
+by hand, but a mode change does mean an embedding run. A molecule RDKit cannot
+parse is passed through unchanged rather than dropped, so it fails where it
+always did.
+
+Adding a mode is one entry in `_MODES` in `data_tools/standardization.py`; the
+CLIs read their choices from that registry.
+
 ## Training
 
 `train-model` trains any supported model on exactly the datasets you list.

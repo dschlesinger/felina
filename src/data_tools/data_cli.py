@@ -11,7 +11,7 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from data_tools import dataset_alias
+from data_tools import dataset_alias, standardization
 from data_tools.dataset_spec import Source
 from data_tools.datasets import Dataset, registry
 from data_tools.paths import DATA_DIR, FEATURE_DIR
@@ -178,6 +178,7 @@ def _run(argv: list[str] | None) -> None:
     """Parse the arguments and do the requested work."""
     parser = argparse.ArgumentParser(description="Manage the project's datasets.")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR, help="Directory holding the datasets (default: DATA_FOLDER, else data)")
+    standardization.add_argument(parser)
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("list", help="List every known dataset with its status").set_defaults(run=_list)
@@ -228,6 +229,8 @@ def _run(argv: list[str] | None) -> None:
     compare.set_defaults(run=lambda args, _datasets: _compare_cmd(args))
 
     args = parser.parse_args(argv)
+    # `explore` and `compare` featurize through the shared cache, so they need the mode too.
+    standardization.set_mode(args.standardization)
     try:
         args.run(args, registry())
     except ValueError as exc:
