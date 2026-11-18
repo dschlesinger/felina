@@ -1,4 +1,4 @@
-"""Uni-Mol backend: fine-tune jointly on the listed datasets.
+"""Uni-Mol v2 backend (the MODEL_SIZE set in representations.unimol): fine-tune jointly on the listed datasets.
 
 One model per (learning rate, seed) with every head at once. Missing labels are
 masked in the loss (unimol_tools' multilabel_regression uses a NaN-masked MAE),
@@ -17,6 +17,7 @@ import torch
 
 from data_tools.merge_datasets import parse_dataset_specs
 from models.training.base import Backend
+from representations.unimol import MODEL_SIZE
 from models.training.common import prepare_joint_split, write_val_outputs
 from data_tools.paths import RESULTS_DIR
 
@@ -85,7 +86,8 @@ class UnimolBackend(Backend):
         trainer = MolTrain(
             task="multilabel_regression",  # NaN-masked loss
             data_type="molecule",
-            model_name="unimolv1",
+            model_name="unimolv2",
+            model_size=MODEL_SIZE,
             smiles_col="SMILES",
             target_cols=target_columns,
             learning_rate=args.learning_rate,

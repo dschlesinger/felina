@@ -25,6 +25,7 @@ from representations.cyp_pharmacophore import (
 )
 from representations.shape import ShapeDescriptors
 from representations.unimol import UniMol
+from representations.unimol import PRETRAINED_CACHE_STEM as UNIMOL_PRETRAINED_CACHE_STEM
 from representations.unimol import cache_name as unimol_cache_name
 from representations.unimol import cache_prefix as unimol_cache_prefix
 from representations.unimol import parse_spec as parse_unimol_spec
@@ -165,6 +166,11 @@ INPUT_REGISTRY: dict[str, Callable[[pl.DataFrame], np.ndarray]] = {
 }
 
 
+# Registered inputs whose cache file is not named after the input: the name stays `unimol`, but the rows an
+# encoder writes are its own, so the Uni-Mol v2 cache must not be read as the v1 one left under data/features/unimol.*.
+_CACHE_STEMS = {_unimol.name: UNIMOL_PRETRAINED_CACHE_STEM}
+
+
 def _stem_for_spec(input_name: str, prefix: str, exact: Callable[[str], str], cache_dir: Path) -> str:
     """The cache stem for a weights spec, falling back to an embedding already made from those weights.
 
@@ -229,7 +235,7 @@ def _featurize_one(df: pl.DataFrame, input_name: str, cache_dir: Path) -> np.nda
     elif monroe_checkpoint is not None:
         stem = _stem_for_spec(input_name, monroe_cache_prefix(input_name), monroe_cache_name, cache_dir)
     else:
-        stem = input_name
+        stem = _CACHE_STEMS.get(input_name, input_name)
     npy_path = cache_dir / f"{stem}.npy"
     idx_path = cache_dir / f"{stem}.idx"
 
