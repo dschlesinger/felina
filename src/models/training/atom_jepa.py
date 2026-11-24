@@ -9,8 +9,8 @@ on at least one selected head) are split by scaffold into a fit set and a holdou
 early-stops on the holdout's masked MAE, and the best epoch's weights are kept. The pinned challenge val split is
 never used for epoch selection; it is only scored and written out, like the other backends.
 
-  train-model --model atom_jepa --datasets challenge pubchem:CYP1A2
-  train-model --model atom_jepa_bio --datasets pubchem:CYP1A2 bindingdb:CYP2C8
+  fm train --model atom_jepa --datasets challenge pubchem:CYP1A2
+  fm train --model atom_jepa_bio --datasets pubchem:CYP1A2 bindingdb:CYP2C8
 
 Each run writes `encoder.pt` (loadable as the `atom_jepa[path]` / `atom_jepa_bio[path]` input) and `head.pt`.
 """

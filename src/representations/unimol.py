@@ -4,7 +4,7 @@ Uses a Uni-Mol v2 encoder (MODEL_SIZE) to generate molecular representations fro
 the pretrained encoder, selected as `unimol`; its rows are cached as PRETRAINED_CACHE_STEM so they never mix with
 the 512-dimensional rows cached from the earlier v1 encoder. A fine-tuned model is selected as `unimol[/path/to/model_0.pth]`
 (or `unimol[alias]`, see foundation_alias) wherever an input name is accepted: the weights are the `model_0.pth`
-written by `train-model --model unimol`, and the fingerprint is the encoder's CLS embedding; the regression head is not used.
+written by `fm train --model unimol`, and the fingerprint is the encoder's CLS embedding; the regression head is not used.
 """
 
 import re
@@ -75,7 +75,7 @@ def _encoder_only(path: Path) -> Path:
     if not any(k.startswith("se3_invariant_kernel.") for k in state):
         raise ValueError(
             f"{path} is not a Uni-Mol v2 checkpoint (no se3_invariant_kernel weights). It was most likely "
-            "fine-tuned by an earlier `train-model --model unimol`, which trained Uni-Mol v1; retrain it."
+            "fine-tuned by an earlier `fm train --model unimol`, which trained Uni-Mol v1; retrain it."
         )
     state = {k: v for k, v in state.items() if not k.startswith("classification_head.")}
     stripped = Path(tempfile.mkdtemp()) / path.name

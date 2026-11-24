@@ -6,7 +6,7 @@ and embeddings depend on that conformer.
 
 Two encoders are exposed: `molecules` (pretrained on Uni-Mol's 19M molecules) as `atom_jepa`, and `bio`
 (continued on ~1.5M PCBA molecules across 1,089 bioassays) as `atom_jepa_bio`. A fine-tuned encoder
-(`encoder.pt` written by `train-model --model atom_jepa[_bio]`) is selected as `atom_jepa[/path/encoder.pt]` or
+(`encoder.pt` written by `fm train --model atom_jepa[_bio]`) is selected as `atom_jepa[/path/encoder.pt]` or
 `atom_jepa_bio[/path/encoder.pt]` (or `[alias]`, see foundation_alias) wherever an input name is accepted.
 Reference: https://huggingface.co/atom-jepa/atom-jepa, https://github.com/khelverskovp/atom-jepa
 """

@@ -93,7 +93,7 @@ def blind_spec() -> DatasetSpec | None:
 def parse_selector(selector: str) -> tuple[DatasetSpec, list[str]]:
     """Parse a `NAME` or `NAME:TARGET,TARGET` selector into its spec and resolved target columns.
 
-    The same grammar `train-model --datasets` uses. Raises ValueError naming the problem.
+    The same grammar `fm train --datasets` uses. Raises ValueError naming the problem.
     """
     name, _, targets = selector.partition(":")
     name = name.strip()

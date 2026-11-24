@@ -1,15 +1,15 @@
-"""Train any supported model on the listed datasets.
+"""Train any supported model on the listed datasets: `foundation-model train` (or `fm train`).
 
-  train-model --model chemprop  --datasets challenge pubchem:CYP1A2 bindingdb:CYP2C8 --loss-function mae
-  train-model --model chemeleon --datasets challenge pubchem:CYP1A2
-  train-model --model unimol    --datasets challenge pubchem:CYP1A2 --learning-rate 2e-4
+  fm train --model chemprop  --datasets challenge pubchem:CYP1A2 bindingdb:CYP2C8 --loss-function mae
+  fm train --model chemeleon --datasets challenge pubchem:CYP1A2
+  fm train --model unimol    --datasets challenge pubchem:CYP1A2 --learning-rate 2e-4
 
 Only the datasets you list are trained on (names from --list-datasets). Repeat
 --datasets for several configs, add --n-seeds N (or --seeds 0 1 2), and for
 unimol give several --learning-rate values: every combination trains one model
 (configs x learning rates x seeds):
 
-  train-model --model unimol --n-seeds 3 --learning-rate 5e-5 2e-4 5e-4 \\
+  fm train --model unimol --n-seeds 3 --learning-rate 5e-5 2e-4 5e-4 \\
       --datasets challenge \\
       --datasets challenge pubchem:CYP1A2 bindingdb:CYP2C8 \\
       --datasets pubchem:CYP1A2 bindingdb:CYP2C8
@@ -40,13 +40,13 @@ def _as_list(value) -> list:
     return [] if value is None else list(value) if isinstance(value, (list, tuple)) else [value]
 
 
-def main(argv: list[str] | None = None, model: str | None = None) -> None:
-    """Entry point for the train-model CLI (`model` pins the backend for the legacy aliases)."""
-    with clean_interrupt("train-model"):
-        _train(argv, model)
+def main(argv: list[str] | None = None, model: str | None = None, prog: str = "foundation-model train") -> None:
+    """Run `foundation-model train` (`model` pins the backend; `prog` is the command name shown in usage)."""
+    with clean_interrupt(prog):
+        _train(argv, model, prog)
 
 
-def _train(argv: list[str] | None, model: str | None) -> None:
+def _train(argv: list[str] | None, model: str | None, prog: str) -> None:
     """Parse the arguments and run every (datasets x learning rate x variant x seed) combination."""
     argv = sys.argv[1:] if argv is None else argv
     if model is None:
@@ -58,12 +58,12 @@ def _train(argv: list[str] | None, model: str | None) -> None:
         if "--list-datasets" in argv:
             print(describe())
             return
-        print(f"usage: train-model --model {{{','.join(sorted(BACKENDS))}}} [...]  (add --help after --model)", file=sys.stderr)
+        print(f"usage: {prog} --model {{{','.join(sorted(BACKENDS))}}} [...]  (add --help after --model)", file=sys.stderr)
         sys.exit(2)
 
     backend = BACKENDS[model]
     parser = argparse.ArgumentParser(
-        prog=f"train-model --model {model}",
+        prog=f"{prog} --model {model}",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
