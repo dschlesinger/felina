@@ -5,7 +5,7 @@ masked in the loss (unimol_tools' multilabel_regression uses a NaN-masked MAE),
 so molecules measured by only one source still train that head. Auxiliary-only
 molecules always land in train, so no validation molecule is seen in training.
 
-  train-model --model unimol --datasets pubchem:CYP1A2 bindingdb:CYP1A2,CYP2C8
+  fm train --model unimol --datasets pubchem:CYP1A2 bindingdb:CYP1A2,CYP2C8
 """
 
 import argparse

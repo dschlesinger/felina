@@ -10,20 +10,20 @@ previous stage's message-passing encoder and aggregation (the heads are fresh,
 so stages can have different heads and even different task types).
 
   # one stage, everything jointly
-  train-model --model chemprop --datasets challenge tdc_hlm tdc_rlm pubchem:CYP1A2 --loss-function mae
+  fm train --model chemprop --datasets challenge tdc_hlm tdc_rlm pubchem:CYP1A2 --loss-function mae
 
   # pretrain on stability, then train on the challenge plus auxiliary heads
-  train-model --model chemprop --stage tdc_hlm tdc_rlm --stage challenge pubchem:CYP1A2 bindingdb:CYP2C8
+  fm train --model chemprop --stage tdc_hlm tdc_rlm --stage challenge pubchem:CYP1A2 bindingdb:CYP2C8
 
   # the same with --pretrain/--finetune (repeat --pretrain for several pretraining stages)
-  train-model --model chemprop --pretrain tdc_hlm tdc_rlm --finetune challenge pubchem:CYP1A2
+  fm train --model chemprop --pretrain tdc_hlm tdc_rlm --finetune challenge pubchem:CYP1A2
 
 Per-stage options take one value per stage (or one value for all): --stage-epochs,
 --stage-warmup-epochs, --stage-max-lr, --stage-lr-warmup-shape, --stage-lr-decay,
 --stage-freeze-epochs, --stage-loss. Freeze the encoder while the fresh head settles
 (then thaw it for the rest of the stage):
 
-  train-model --model chemprop --pretrain tdc_hlm --finetune challenge \\
+  fm train --model chemprop --pretrain tdc_hlm --finetune challenge \\
       --stage-epochs 30 50 --stage-freeze-epochs 0 10 --stage-warmup-epochs 2 5 --stage-lr-warmup-shape linear cosine
 
 Sweep encoder size (the head is thrown away when the encoder is used as features):

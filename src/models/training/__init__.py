@@ -1,4 +1,4 @@
-"""Training backends behind the `train-model` CLI.
+"""Training backends behind the `foundation-model train` CLI.
 
 To add a model: create a module here with a Backend subclass (see base.py), then
 register it in BACKENDS below. Shared data handling lives in common.py.

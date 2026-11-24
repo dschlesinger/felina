@@ -6,7 +6,7 @@ Code for the OpenADMET CYP Inhibition Blind Challenge.
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/python -m pip install -e .   # installs requirements.txt and registers the CLI entry points (data, train-model, evaluate-models, ...)
+./.venv/bin/python -m pip install -e .   # installs requirements.txt and registers the CLI entry points (data, foundation-model/fm, evaluate-models, ...)
 ```
 
 Folders default to `data/`, `data/features/` and `results/`. To put them elsewhere, copy `.env.example` to `.env` in the
@@ -268,8 +268,8 @@ SMILES off (`models.training.common.merge_stage`) alike. Without it the same
 molecule spelled two ways in train and blind gets two cache rows and two
 different feature vectors.
 
-`--standardization` picks the mode on `evaluate-models`, `train-model`,
-`representations` and `foundation-model`:
+`--standardization` picks the mode on `evaluate-models`, `foundation-model train`,
+`representations` and the other `foundation-model` subcommands:
 
 | Mode | What it does |
 | --- | --- |
@@ -316,7 +316,7 @@ CLIs read their choices from that registry.
 
 ## Training
 
-`train-model` trains any supported model on exactly the datasets you list.
+`foundation-model train` (or `fm train`) trains any supported model on exactly the datasets you list.
 Pick the model with `--model`:
 
 | `--model` | What it trains |
@@ -328,25 +328,25 @@ Pick the model with `--model`:
 | `atom_jepa_bio` | same, started from the Atom-JEPA-Bio encoder (`molecules` continued on PCBA bioassays) |
 
 ```bash
-train-model --list-datasets                     # selectable sources
-train-model --model chemprop --datasets challenge tdc_hlm pubchem:CYP1A2 bindingdb:CYP1A2,CYP2C8 --loss-function mae
-train-model --model chemeleon --datasets challenge pubchem:CYP1A2
-train-model --model unimol --datasets challenge pubchem:CYP1A2 --learning-rate 2e-4
+fm train --list-datasets                     # selectable sources
+fm train --model chemprop --datasets challenge tdc_hlm pubchem:CYP1A2 bindingdb:CYP1A2,CYP2C8 --loss-function mae
+fm train --model chemeleon --datasets challenge pubchem:CYP1A2
+fm train --model unimol --datasets challenge pubchem:CYP1A2 --learning-rate 2e-4
 # configs x learning rates x seeds: repeat --datasets, add --n-seeds N (or --seeds 0 1 2) and, for unimol, several
 # --learning-rate values; one model per combination
-train-model --model unimol --n-seeds 3 --learning-rate 1e-2 1e-3 1e-4 \
+fm train --model unimol --n-seeds 3 --learning-rate 1e-2 1e-3 1e-4 \
     --datasets challenge \
     --datasets challenge pubchem:CYP1A2 bindingdb:CYP2C8 \
     --datasets pubchem:CYP1A2 bindingdb:CYP2C8
 # pretrain on stability, then train on the ADMET data plus auxiliary heads (chemprop/chemeleon)
-train-model --model chemprop --stage tdc_hlm tdc_rlm --stage challenge pubchem:CYP1A2
+fm train --model chemprop --stage tdc_hlm tdc_rlm --stage challenge pubchem:CYP1A2
 # same thing, with per-stage settings and an encoder-size sweep
-train-model --model chemprop --pretrain tdc_hlm --finetune challenge pubchem:CYP1A2 \
+fm train --model chemprop --pretrain tdc_hlm --finetune challenge pubchem:CYP1A2 \
     --stage-epochs 30 50 --stage-freeze-epochs 0 5 --stage-lr-warmup-shape linear cosine \
     --stage-loss mae huber --huber-delta 0.5 --hidden-dims 300 600 --mpn-dropouts 0 0.1
 ```
 
-`--datasets` takes any name from `train-model --list-datasets` (`challenge`, `pubchem`,
+`--datasets` takes any name from `fm train --list-datasets` (`challenge`, `pubchem`,
 `bindingdb`, `tdi`, `tdc_hlm`, ...), as `NAME[:TARGET,TARGET]`; heads are named
 `{target}-{source}`. Only what you list is trained on: `--datasets challenge` is the
 challenge labels alone, `--datasets challenge pubchem` is both, and `--datasets pubchem`
@@ -369,7 +369,7 @@ Other flags: `--learning-rate` (swept like seeds), `--head-lr-mult`, `--batch-si
 and `head.pt` under `<config>/lr_<lr>_seed_<N>/`.
 
 Chemprop training options (`src/models/chemprop_ext.py` patches them into
-`chemprop train`; `train-model` runs chemprop through it):
+`chemprop train`; `fm train` runs chemprop through it):
 
 | Flag | Effect |
 |---|---|
@@ -401,8 +401,33 @@ every stage: it is computed per molecule, cached in `data/features/`, and passed
 chemprop as `--descriptors-path` (non-finite values become 0 with a warning; chemprop
 scales them by default, `--no-descriptor-scaling` turns that off). To train on a ready table
 instead, `--data-path <table.csv> --target-columns <heads>`.
-On SCC, `scripts/train_model.qsub` forwards its arguments to `train-model`. To add a
+On SCC, `scripts/train_model.qsub` forwards its arguments to `foundation-model train`. To add a
 model, write a `Backend` in `src/models/training/` and register it in `BACKENDS`.
+
+### Foundation models
+
+`foundation-model` (short: `fm`) gathers everything about the foundation models in one place:
+
+```bash
+fm avail                                   # every model: pretrained weights on disk (size), train+test embedding coverage, fine-tunes (count, size)
+fm finetunes                               # fine-tuned weights on this machine: alias, size, train+test embedding coverage, path
+fm finetunes --models unimol chemeleon     # only these models' fine-tunes
+fm embed                                   # embed train+test with every pretrained encoder and every fine-tune
+fm embed --model unimol                    # Uni-Mol's pretrained encoder and every Uni-Mol fine-tune
+fm embed --model unimol --only pretrained  # just the pretrained encoder (--only finetuned: just the fine-tunes)
+fm embed --model challenge_0 --dataset tdc_hlm   # one fine-tune (by alias), on another dataset
+fm train --model chemeleon --datasets challenge  # see Training
+```
+
+The models are `chemprop` (no pretrained weights), `chemeleon`, `unimol`, `atom_jepa`, `atom_jepa_bio` and
+`monroe` (embedding only, no fine-tuning). Fine-tunes are found in the `fm train` run folders
+(`results/runs/<id>__train__model=<model>_.../`) and in the older per-model homes (`results/chemprop/`,
+`results/unimol/`, ...). Each gets an alias saved in `foundation-path-alias.csv`, usable as `chemprop[ALIAS]`,
+`unimol[ALIAS]` or `atom_jepa[ALIAS]` wherever an input is accepted. When the terminal is too narrow for the weights
+path, `fm finetunes` leaves it out and the alias stands in for it (`--paths` always shows it, `--no-paths` never does).
+`fm embed --dataset` takes dataset names, aliases or CSV paths (default: the challenge train and test sets) and only
+computes molecules that are not cached yet. On SCC, `scripts/foundation_representations.qsub` runs `fm embed` with
+any arguments you pass it.
 
 ### Other commands
 
@@ -411,9 +436,9 @@ Every command takes `--help`.
 ```bash
 evaluate-models      # train/val metrics for the sklearn-style models; see Representations and Ensembling
 plot-results         # redraw the evaluate-models plots from a saved --predictions-out CSV
-foundation-model     # list/alias trained chemprop, unimol and Atom-JEPA runs and generate their feature caches, plus the pretrained chemeleon, unimol, atom_jepa and atom_jepa_bio (--list, --paths, --generate-cache)
+foundation-model     # (or fm) foundation models: avail, finetunes, embed, train; see Foundation models below
 motif-report         # generate reports/pharmacophore_features.md from the pharmacophore motif table
-list-runs            # previous train-model / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
+list-runs            # previous fm train / evaluate-models runs (--train-model, --eval, -n N, or an id for one run)
 download-leaderboard # save snapshots of the challenge Space's leaderboards (--list, --all, --select final)
 leaderboard-lit      # fetch every method report / repo linked from the saved leaderboards (--fetch, --open-code, --list)
 ```
@@ -428,7 +453,7 @@ exported as text, Drive files downloaded, and every other page saved as `page.ht
 `links.txt`. `index.csv` records each link's status; `FAILURES.md` lists the ones that failed (HTTP 403/404, missing
 repos, timeouts) or came back nearly empty (login walls, JavaScript-only pages). Reruns retry only what failed.
 
-`train-model` (one run per seed/config of a sweep) and `evaluate-models` give every run its own folder,
+`fm train` (one run per seed/config of a sweep) and `evaluate-models` give every run its own folder,
 `results/runs/<id>__<train|eval>__<flags>/`, and write everything the run produces into it. The id counts up, and the
 folder name lists the flags that differ from their default (`key=value`, `+` between list items; output paths are left
 out). `run.log` holds the output while still printing it, starting with the full command and git commit and ending with
@@ -451,7 +476,7 @@ post-hoc calibration can be refitted from the CSV without retraining anything. I
 on the fit rows is extra inference and the file grows with models x inputs x targets x seeds x folds.
 
 Flags that write a file take an optional path: bare (`--predictions-out`) writes the default name in the run folder,
-and with a path it writes there instead. `train-model` puts its checkpoints and metrics in the run folder too, unless
+and with a path it writes there instead. `fm train` puts its checkpoints and metrics in the run folder too, unless
 `--output-dir` names somewhere else. Logs from before run folders existed are flat `.log` files; `list-runs` still
 reads them, and `list-runs --migrate` moves them into folders.
 

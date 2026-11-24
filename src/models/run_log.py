@@ -1,6 +1,6 @@
 """Per-run folders in `<RESULTS_FOLDER>/runs`, and the `list-runs` CLI that reads them back.
 
-Every `train-model` and `evaluate-models` run gets its own folder, `<id>__<kind>__<flags>/`:
+Every `fm train` and `evaluate-models` run gets its own folder, `<id>__<kind>__<flags>/`:
 
     0007__train__model=unimol_datasets=challenge_seed=43/
     0008__eval__models=xgb+rf_split=butina/
@@ -385,9 +385,9 @@ def _table(runs: list[RunInfo]) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the list-runs CLI."""
-    parser = argparse.ArgumentParser(prog="list-runs", description="List previous train-model and evaluate-models runs, newest first.")
+    parser = argparse.ArgumentParser(prog="list-runs", description="List previous `fm train` and evaluate-models runs, newest first.")
     parser.add_argument("run_id", nargs="?", type=int, help="Show one run in full: command, commit, log path and the end of its output")
-    parser.add_argument("--train-model", action="store_true", help="Only train-model runs")
+    parser.add_argument("--train-model", action="store_true", help="Only `fm train` runs")
     parser.add_argument("--eval", action="store_true", help="Only evaluate-models runs")
     parser.add_argument("-n", type=int, default=None, metavar="N", help="Only the newest N runs")
     parser.add_argument("--dir", type=Path, default=RUNS_DIR, help="Folder with the run logs (default: <RESULTS_FOLDER>/runs)")
